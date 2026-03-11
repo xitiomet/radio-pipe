@@ -107,26 +107,30 @@ public class StreamRecorder {
                             false);
 
                     try (AudioInputStream din = AudioSystem.getAudioInputStream(decodedFormat, audio)) {
-                        AudioInputStream targetDin = din;
-                        AudioFormat activeFormat = decodedFormat;
                         if (AudioSystem.isConversionSupported(outputFormat, decodedFormat)) {
-                            targetDin = AudioSystem.getAudioInputStream(outputFormat, din);
-                            activeFormat = outputFormat;
+                            try (AudioInputStream converted = AudioSystem.getAudioInputStream(outputFormat, din)) {
+                                log("READY", ANSI_GREEN,
+                                        String.format(
+                                                "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
+                                                outputFormat.getSampleRate(),
+                                                outputFormat.getChannels(),
+                                                outputFormat.getSampleSizeInBits(),
+                                                silenceThresholdDb,
+                                                silenceDurationSeconds));
+                                processStream(converted, outputFormat);
+                            }
                         } else {
                             log("FORMAT", ANSI_YELLOW,
                                     "Requested output format is not supported by this JVM; using decoded stream format.");
-                        }
-
-                        log("READY", ANSI_GREEN,
-                                String.format(
-                                        "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
-                                        activeFormat.getSampleRate(),
-                                        activeFormat.getChannels(),
-                                        activeFormat.getSampleSizeInBits(),
-                                        silenceThresholdDb,
-                                        silenceDurationSeconds));
-                        try (AudioInputStream converted = targetDin) {
-                            processStream(converted, activeFormat);
+                            log("READY", ANSI_GREEN,
+                                    String.format(
+                                            "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
+                                            decodedFormat.getSampleRate(),
+                                            decodedFormat.getChannels(),
+                                            decodedFormat.getSampleSizeInBits(),
+                                            silenceThresholdDb,
+                                            silenceDurationSeconds));
+                            processStream(din, decodedFormat);
                         }
                     }
                 }
