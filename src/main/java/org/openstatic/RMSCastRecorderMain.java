@@ -3,6 +3,7 @@ package org.openstatic;
 import org.apache.commons.cli.*;
 
 import java.net.URL;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
@@ -20,7 +21,7 @@ public class RMSCastRecorderMain
         options.addOption(Option.builder("u").longOpt("url").hasArg().argName("URL")
                 .desc("Shoutcast/Icecast stream URL to record").required().build());
         options.addOption(Option.builder("o").longOpt("out").hasArg().argName("DIR")
-                .desc("Base directory where recordings will be stored (default=.)").build());
+            .desc("Base directory where recordings will be stored (default=./recordings)").build());
         options.addOption(Option.builder("t").longOpt("threshold").hasArg().argName("DB")
                 .desc("Silence threshold in dB (default -50)").build());
         options.addOption(Option.builder("s").longOpt("silence").hasArg().argName("SECONDS")
@@ -35,7 +36,8 @@ public class RMSCastRecorderMain
 
             // gather options
             URL url = new URL(cmd.getOptionValue("u"));
-            Path outDir = Paths.get(cmd.getOptionValue("o", "."));
+            Path outDir = Paths.get(cmd.getOptionValue("o", "./recordings"));
+            Files.createDirectories(outDir);
             double threshold = Double.parseDouble(cmd.getOptionValue("t", "-50"));
             double silenceSeconds = Double.parseDouble(cmd.getOptionValue("s", "2"));
 

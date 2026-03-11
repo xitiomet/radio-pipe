@@ -24,11 +24,18 @@ import java.time.format.DateTimeFormatter;
  * collector closes the current clip and waits for new audio.
  */
 public class StreamRecorder {
+    private static final String ANSI_RESET = "\u001B[0m";
+    private static final String ANSI_RED = "\u001B[31m";
+    private static final String ANSI_GREEN = "\u001B[32m";
+    private static final String ANSI_YELLOW = "\u001B[33m";
+    private static final String ANSI_BLUE = "\u001B[34m";
+    private static final String ANSI_CYAN = "\u001B[36m";
     private final URL streamUrl;
     private final Path baseDir;
     private final double silenceThresholdDb;
     private final double silenceDurationSeconds;
     private volatile boolean running = true;
+    private volatile String streamLabel;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_DATE;
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH-mm-ss");
 
@@ -37,23 +44,36 @@ public class StreamRecorder {
         this.baseDir = baseDir;
         this.silenceThresholdDb = silenceThresholdDb;
         this.silenceDurationSeconds = silenceDurationSeconds;
+        this.streamLabel = sanitizeStreamName(streamUrl.getPath());
     }
 
     public void stop() {
         running = false;
+        log("STOP", ANSI_YELLOW, "Shutdown requested, finishing current write before exit.");
     }
 
     public void run() throws Exception {
         while (running) {
             try {
-                System.out.println("Connecting to " + streamUrl);
+                log("CONNECT", ANSI_BLUE, "Connecting to " + streamUrl);
                 HttpURLConnection conn = (HttpURLConnection) streamUrl.openConnection();
                 conn.setRequestProperty("User-Agent", "rms-cast-recorder/1.0");
                 conn.setConnectTimeout(10000);
                 conn.setReadTimeout(15000);
+                conn.connect();
+                updateStreamLabel(conn);
+                log("STREAM", ANSI_CYAN,
+                        "Connected: name=" + streamLabel
+                                + ", type=" + valueOrUnknown(conn.getContentType())
+                                + ", bitrate=" + valueOrUnknown(conn.getHeaderField("icy-br")) + " kbps");
                 try (InputStream raw = new BufferedInputStream(conn.getInputStream())) {
                     AudioInputStream audio = AudioSystem.getAudioInputStream(raw);
                     AudioFormat baseFormat = audio.getFormat();
+                    log("FORMAT", ANSI_CYAN,
+                            String.format("Input format: %.0f Hz, %d channel(s), %s",
+                                    baseFormat.getSampleRate(),
+                                    baseFormat.getChannels(),
+                                    baseFormat.getEncoding()));
 
                     AudioFormat decodedFormat = new AudioFormat(
                             AudioFormat.Encoding.PCM_SIGNED,
@@ -65,13 +85,19 @@ public class StreamRecorder {
                             false);
 
                     try (AudioInputStream din = AudioSystem.getAudioInputStream(decodedFormat, audio)) {
+                        log("READY", ANSI_GREEN,
+                                String.format("Monitoring audio, silence threshold %.1f dB for %.1f s",
+                                        silenceThresholdDb, silenceDurationSeconds));
                         processStream(din, decodedFormat);
                     }
                 }
             } catch (Exception e) {
-                System.err.println("Connection error: " + e.getMessage());
+                logError("Connection error: " + e.getMessage());
                 e.printStackTrace(System.err);
-                Thread.sleep(5000);
+                if (running) {
+                    log("RETRY", ANSI_YELLOW, "Retrying in 5 seconds...");
+                    Thread.sleep(5000);
+                }
             }
         }
     }
@@ -83,6 +109,7 @@ public class StreamRecorder {
 
         byte[] buffer = new byte[frameSize * 1024];
         ByteArrayOutputStream chunk = new ByteArrayOutputStream();
+        long recordedFrames = 0;
         long silentFrames = 0;
         long chunkStartTime = 0;
 
@@ -92,18 +119,25 @@ public class StreamRecorder {
             if (!isSilent) {
                 if (chunk.size() == 0) {
                     chunkStartTime = System.currentTimeMillis();
+                    log("RECORD", ANSI_GREEN,
+                            "Audio detected, starting clip for stream " + streamLabel + ".");
                 }
                 chunk.write(buffer, 0, n);
+                recordedFrames += n / frameSize;
                 silentFrames = 0;
             } else {
                 silentFrames += n / frameSize;
                 if (silentFrames >= framesForSilence && chunk.size() > 0) {
+                    log("SILENCE", ANSI_YELLOW,
+                            String.format("Silence reached after %.1f s, closing clip.",
+                                    recordedFrames / frameRate));
                     writeChunk(chunk.toByteArray(), format, chunkStartTime);
                     chunk.reset();
+                    recordedFrames = 0;
+                    silentFrames = 0;
                 }
             }
         }
-        // end of stream or stopped
         if (chunk.size() > 0) {
             writeChunk(chunk.toByteArray(), format, chunkStartTime);
             chunk.reset();
@@ -148,16 +182,76 @@ public class StreamRecorder {
             LocalTime time = instant.atZone(ZoneId.systemDefault()).toLocalTime();
             Path dateDir = baseDir.resolve(date.format(DATE_FMT));
             Files.createDirectories(dateDir);
-            String name = time.format(TIME_FMT) + ".wav";
+            String name = time.format(TIME_FMT) + "_" + streamLabel + ".wav";
             Path out = dateDir.resolve(name);
             try (ByteArrayInputStream bais = new ByteArrayInputStream(audioData);
                  AudioInputStream ais = new AudioInputStream(bais, format, audioData.length / format.getFrameSize())) {
                 AudioSystem.write(ais, AudioFileFormat.Type.WAVE, out.toFile());
             }
-            System.out.println("wrote " + out);
+            log("WRITE", ANSI_GREEN, "Saved clip: " + out);
         } catch (IOException ioe) {
-            System.err.println("failed to write chunk: " + ioe.getMessage());
+            logError("Failed to write chunk: " + ioe.getMessage());
             ioe.printStackTrace(System.err);
         }
+    }
+
+    private void updateStreamLabel(HttpURLConnection conn) {
+        String headerName = firstNonBlank(
+                conn.getHeaderField("icy-name"),
+                conn.getHeaderField("x-audiocast-name"),
+                conn.getHeaderField("ice-name"),
+                streamUrl.getPath());
+        this.streamLabel = sanitizeStreamName(headerName);
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.trim().isEmpty()) {
+                return value.trim();
+            }
+        }
+        return "stream";
+    }
+
+    private static String sanitizeStreamName(String value) {
+        String candidate = firstNonBlank(value);
+        int slashIndex = candidate.lastIndexOf('/');
+        if (slashIndex >= 0 && slashIndex < candidate.length() - 1) {
+            candidate = candidate.substring(slashIndex + 1);
+        }
+        candidate = candidate.replaceAll("\\.[A-Za-z0-9]{1,5}$", "");
+        candidate = candidate.replaceAll("[^A-Za-z0-9._-]+", "_");
+        candidate = candidate.replaceAll("_+", "_");
+        candidate = candidate.replaceAll("^_+|_+$", "");
+        if (candidate.isEmpty()) {
+            return "stream";
+        }
+        return candidate;
+    }
+
+    private static String valueOrUnknown(String value) {
+        return (value == null || value.trim().isEmpty()) ? "unknown" : value.trim();
+    }
+
+    private void log(String tag, String color, String message) {
+        String prefix = "[" + tag + "] ";
+        if (supportsAnsi()) {
+            System.out.println(color + prefix + ANSI_RESET + message);
+        } else {
+            System.out.println(prefix + message);
+        }
+    }
+
+    private void logError(String message) {
+        String prefix = "[ERROR] ";
+        if (supportsAnsi()) {
+            System.err.println(ANSI_RED + prefix + ANSI_RESET + message);
+        } else {
+            System.err.println(prefix + message);
+        }
+    }
+
+    private static boolean supportsAnsi() {
+        return System.console() != null;
     }
 }
