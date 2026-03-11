@@ -60,10 +60,6 @@ public class RMSCastRecorderMain
             // gather options
             boolean hasUrl = cmd.hasOption("u");
             boolean useStdin = cmd.hasOption("i");
-            if (hasUrl == useStdin) {
-                throw new ParseException("Specify exactly one input source: --url <URL> or --stdin");
-            }
-
             boolean stdinRaw = cmd.hasOption("stdin-raw");
             boolean hasRawFormatFlags = cmd.hasOption("stdin-rate")
                     || cmd.hasOption("stdin-channels")
@@ -74,11 +70,11 @@ public class RMSCastRecorderMain
             {
                 useStdin = true; // if any raw format flags are set, we require stdin input
             }
-            if ((stdinRaw || hasRawFormatFlags) && !useStdin) {
-                throw new ParseException("Raw stdin options require --stdin");
+            if (hasUrl == useStdin) {
+                throw new ParseException("Specify exactly one input source: --url <URL> or --stdin");
             }
             if (hasRawFormatFlags && !stdinRaw) {
-                throw new ParseException("Raw stdin format flags require --stdin-raw");
+                stdinRaw = true; // if any raw format flags are set, we assume raw mode
             }
 
             URL url = hasUrl ? new URL(cmd.getOptionValue("u")) : null;
