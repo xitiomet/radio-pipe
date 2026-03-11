@@ -15,7 +15,7 @@ Recordings are broken into WAV files whenever the stream goes silent and are pla
 
 URL example:
 ```bash
-$ java -jar target/rms-cast-recorder-1.0.jar \
+$ ./rms-cast-recorder \
       -u http://example.com:8000/stream.mp3 \
   -o ./recordings \
   -x /usr/local/bin/on-clip-written.sh \
@@ -25,19 +25,19 @@ $ java -jar target/rms-cast-recorder-1.0.jar \
 stdin example (`arecord`):
 ```bash
 $ arecord -f S16_LE -c 1 -r 8000 -t wav - \
-  | java -jar target/rms-cast-recorder-1.0.jar --stdin -o ./recordings
+  | ./rms-cast-recorder --stdin -o ./recordings
 ```
 
 stdin example (`sox`):
 ```bash
 $ sox /path/to/input.mp3 -t wav - \
-  | java -jar target/rms-cast-recorder-1.0.jar --stdin -o ./recordings
+  | ./rms-cast-recorder --stdin -o ./recordings
 ```
 
 raw PCM stdin example (`arecord`):
 ```bash
 $ arecord -f S16_LE -c 1 -r 8000 -t raw - \
-  | java -jar target/rms-cast-recorder-1.0.jar --stdin --stdin-raw \
+  | ./rms-cast-recorder --stdin --stdin-raw \
     --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
     -o ./recordings
 ```
