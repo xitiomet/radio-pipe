@@ -13,7 +13,7 @@
     <maven.compiler.target>11</maven.compiler.target>
     <imageName>rms-cast-recorder</imageName>
     <graalvm.version>22.1.0</graalvm.version>
-    <skipNative>true</skipNative>
+    <skipNative>false</skipNative>
   </properties>
   <dependencies>
     <dependency>

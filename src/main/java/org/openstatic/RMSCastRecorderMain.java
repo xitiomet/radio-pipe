@@ -82,7 +82,7 @@ public class RMSCastRecorderMain
     public static void showHelp(Options options)
     {
         HelpFormatter formatter = new HelpFormatter();
-        formatter.printHelp( "rms-cast-recorder", "RMSCastRecorder: A Fun Program", options, "" );
+        formatter.printHelp( "rms-cast-recorder", "RMSCastRecorder: A tool for recording shoutcast or icecast streams", options, "" );
         System.exit(0);
     }
 }
