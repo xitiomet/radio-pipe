@@ -6,6 +6,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -37,6 +39,7 @@ public class StreamRecorder {
     private final float outputSampleRate;
     private final int outputChannels;
     private final int outputBitDepth;
+    private final List<String> onWriteCommand;
     private volatile boolean running = true;
     private volatile String streamLabel;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_DATE;
@@ -49,7 +52,8 @@ public class StreamRecorder {
                           double silenceDurationSeconds,
                           float outputSampleRate,
                           int outputChannels,
-                          int outputBitDepth) {
+                          int outputBitDepth,
+                          String onWriteProgram) {
         this.streamUrl = streamUrl;
         this.baseDir = baseDir;
         this.silenceThresholdDb = silenceThresholdDb;
@@ -57,6 +61,7 @@ public class StreamRecorder {
         this.outputSampleRate = outputSampleRate;
         this.outputChannels = outputChannels;
         this.outputBitDepth = outputBitDepth;
+        this.onWriteCommand = parseCommandLine(onWriteProgram);
         this.streamLabel = sanitizeStreamName(streamUrl.getPath());
     }
 
@@ -66,6 +71,7 @@ public class StreamRecorder {
     }
 
     public void run() throws Exception {
+        logHookConfiguration();
         while (running) {
             try {
                 log("CONNECT", ANSI_BLUE, "Connecting to " + streamUrl);
@@ -232,10 +238,154 @@ public class StreamRecorder {
                 AudioSystem.write(ais, AudioFileFormat.Type.WAVE, out.toFile());
             }
             log("WRITE", ANSI_GREEN, "Saved clip: " + out);
+            runOnWriteProgram(out.toAbsolutePath());
         } catch (IOException ioe) {
             logError("Failed to write chunk: " + ioe.getMessage());
             ioe.printStackTrace(System.err);
         }
+    }
+
+    private void runOnWriteProgram(Path wavPath) {
+        if (this.onWriteCommand == null || this.onWriteCommand.isEmpty()) {
+            return;
+        }
+
+        final String wavFile = wavPath.toString();
+        Thread hookThread = new Thread(() -> {
+            try {
+                List<String> command = buildHookCommand(wavFile);
+                ProcessBuilder pb = new ProcessBuilder(command);
+                pb.redirectErrorStream(true);
+                Process process = pb.start();
+
+                try (BufferedReader outputReader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                    String line;
+                    while ((line = outputReader.readLine()) != null) {
+                        log("HOOK", ANSI_BLUE, line);
+                    }
+                }
+
+                int exitCode = process.waitFor();
+                if (exitCode == 0) {
+                    log("HOOK", ANSI_GREEN, "Completed for " + wavFile);
+                } else {
+                    log("HOOK", ANSI_YELLOW,
+                            "Exited with code " + exitCode + " for " + wavFile);
+                }
+            } catch (Exception e) {
+                logError("on-write execution failed for " + wavFile + ": " + e.getMessage());
+            }
+        }, "on-write-hook");
+        hookThread.setDaemon(true);
+        hookThread.start();
+    }
+
+    private List<String> buildHookCommand(String wavFile) {
+        List<String> command = new ArrayList<>();
+        command.add(this.onWriteCommand.get(0));
+
+        boolean hasPlaceholder = false;
+        for (int i = 1; i < this.onWriteCommand.size(); i++) {
+            String token = this.onWriteCommand.get(i);
+            if ("{wav}".equals(token)) {
+                command.add(wavFile);
+                hasPlaceholder = true;
+            } else {
+                command.add(token);
+            }
+        }
+
+        if (!hasPlaceholder) {
+            // Default behavior keeps WAV path as argument 1 to the target program.
+            command.add(1, wavFile);
+        }
+
+        return command;
+    }
+
+    private void logHookConfiguration() {
+        if (this.onWriteCommand == null || this.onWriteCommand.isEmpty()) {
+            return;
+        }
+
+        boolean hasPlaceholder = false;
+        for (String token : this.onWriteCommand) {
+            if ("{wav}".equals(token)) {
+                hasPlaceholder = true;
+                break;
+            }
+        }
+
+        if (hasPlaceholder) {
+            log("HOOK", ANSI_CYAN, "on-write enabled (mode=placeholder): " + String.join(" ", this.onWriteCommand));
+        } else {
+            log("HOOK", ANSI_CYAN, "on-write enabled (mode=arg1): " + String.join(" ", this.onWriteCommand));
+        }
+    }
+
+    private static List<String> parseCommandLine(String commandLine) {
+        if (commandLine == null) {
+            return null;
+        }
+        String source = commandLine.trim();
+        if (source.isEmpty()) {
+            return null;
+        }
+
+        List<String> tokens = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inSingleQuote = false;
+        boolean inDoubleQuote = false;
+        boolean escaping = false;
+
+        for (int i = 0; i < source.length(); i++) {
+            char ch = source.charAt(i);
+
+            if (escaping) {
+                current.append(ch);
+                escaping = false;
+                continue;
+            }
+
+            if (ch == '\\') {
+                escaping = true;
+                continue;
+            }
+
+            if (ch == '\'' && !inDoubleQuote) {
+                inSingleQuote = !inSingleQuote;
+                continue;
+            }
+
+            if (ch == '"' && !inSingleQuote) {
+                inDoubleQuote = !inDoubleQuote;
+                continue;
+            }
+
+            if (Character.isWhitespace(ch) && !inSingleQuote && !inDoubleQuote) {
+                if (current.length() > 0) {
+                    tokens.add(current.toString());
+                    current.setLength(0);
+                }
+                continue;
+            }
+
+            current.append(ch);
+        }
+
+        if (escaping) {
+            current.append('\\');
+        }
+
+        if (current.length() > 0) {
+            tokens.add(current.toString());
+        }
+
+        if (tokens.isEmpty()) {
+            return null;
+        }
+
+        return tokens;
     }
 
     private void updateStreamLabel(HttpURLConnection conn) {

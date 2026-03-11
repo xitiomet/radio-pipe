@@ -32,6 +32,8 @@ public class RMSCastRecorderMain
             .desc("Output channels (1=mono, 2=stereo) (default 1)").build());
         options.addOption(Option.builder("b").longOpt("bitrate").hasArg().argName("BITS")
             .desc("Output PCM bit depth in bits (default 16)").build());
+        options.addOption(Option.builder("x").longOpt("on-write").hasArg().argName("PROGRAM")
+            .desc("Optional hook command run after each WAV write; use {wav} placeholder or WAV is arg1 by default").build());
 
         try {
             cmd = parser.parse(options, args);
@@ -49,6 +51,7 @@ public class RMSCastRecorderMain
             float outputSampleRate = Float.parseFloat(cmd.getOptionValue("r", "8000"));
             int outputChannels = Integer.parseInt(cmd.getOptionValue("c", "1"));
             int outputBitDepth = Integer.parseInt(cmd.getOptionValue("b", "16"));
+            String onWriteProgram = cmd.getOptionValue("x");
 
             if (outputSampleRate <= 0) {
                 throw new ParseException("sample-rate must be > 0");
@@ -67,7 +70,8 @@ public class RMSCastRecorderMain
                     silenceSeconds,
                     outputSampleRate,
                     outputChannels,
-                    outputBitDepth);
+                    outputBitDepth,
+                    onWriteProgram);
             Runtime.getRuntime().addShutdownHook(new Thread(recorder::stop));
             recorder.run();
 

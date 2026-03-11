@@ -18,6 +18,7 @@ Example:
 $ java -jar target/rms-cast-recorder-1.0.jar \
       -u http://example.com:8000/stream.mp3 \
   -o ./recordings \
+  -x /usr/local/bin/on-clip-written.sh \
   -r 8000 -c 1 -b 16
 ```
 
@@ -31,4 +32,12 @@ Options:
 * `-r,--sample-rate <HZ>` – output sample rate in Hz (default `8000`)
 * `-c,--channels <N>` – output channels (`1` mono, `2` stereo; default `1`)
 * `-b,--bitrate <BITS>` – output PCM bit depth in bits (default `16`)
+* `-x,--on-write <PROGRAM>` – optional script/program to run each time a WAV is
+  written; if `{wav}` is omitted, the full WAV path is passed as argument 1
 * `-?,--help` – display help and exit
+
+Examples for `--on-write`:
+
+* `-x /usr/local/bin/on-clip-written.sh`
+* `-x "/usr/local/bin/on-clip-written.sh --tag repeater-a"` (WAV path is still arg1)
+* `-x "/usr/bin/python3 /opt/hooks/process_clip.py {wav} --mode fast"`
