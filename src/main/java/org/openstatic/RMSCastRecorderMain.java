@@ -70,7 +70,7 @@ public class RMSCastRecorderMain
                     || cmd.hasOption("stdin-bits")
                     || cmd.hasOption("stdin-big-endian")
                     || cmd.hasOption("stdin-unsigned");
-            if (hasRawFormatFlags)
+            if (hasRawFormatFlags || stdinRaw)
             {
                 useStdin = true; // if any raw format flags are set, we require stdin input
             }
