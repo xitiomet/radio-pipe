@@ -87,7 +87,7 @@ public class RMSCastRecorderMain
     {
         HelpFormatter formatter = new HelpFormatter();
         formatter.printHelp( "rms-cast-recorder", "RMSCastRecorder: A tool for recording shoutcast or icecast streams", options, "" );
-        System.err.println("For more information please visit https://openstatic.org/projects/rms-cast-recorder")
+        System.err.println("For more information please visit https://openstatic.org/projects/rms-cast-recorder");
         System.exit(0);
     }
 }

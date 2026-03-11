@@ -282,7 +282,16 @@ public class StreamRecorder {
 
     private List<String> buildHookCommand(String wavFile) {
         List<String> command = new ArrayList<>();
-        command.add(this.onWriteCommand.get(0));
+        String firstArg = this.onWriteCommand.get(0);
+        if (firstArg.toLowerCase().endsWith(".exe"))
+        {
+            if (firstArg.startsWith("/mnt/c/") || firstArg.startsWith("/mnt/d/") || firstArg.startsWith("/mnt/e/"))
+            {
+                wavFile = wavFile.substring(5,1).toUpperCase() + ":]"+ wavFile.substring(7).replace('/','\');
+                log("HOOK", ANSI_CYAN, "WSL Path Translated " + wavFile);
+            }
+        }
+        command.add(firstArg);
 
         boolean hasPlaceholder = false;
         for (int i = 1; i < this.onWriteCommand.size(); i++) {

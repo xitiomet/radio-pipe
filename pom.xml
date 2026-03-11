@@ -176,7 +176,6 @@
                     --allow-incomplete-classpath
                     --report-unsupported-elements-at-runtime
                     -H:+ReportExceptionStackTraces
-                    -H:+AllowDeprecatedBuilderClassesOnImageClasspath
                 </buildArgs>
             </configuration>
        </plugin>
