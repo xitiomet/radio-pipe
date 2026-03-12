@@ -10,10 +10,25 @@ A recording will be created as follows:
 
 Regular builds can be found at https://openstatic.org/projects/rms-cast-recorder/ (scroll to the bottom)
 
+### Screenshot
+![](https://openstatic.org/projects/rms-cast-recorder/rms_screenshot.png)
+
+### Optional PHP Interface
+![](https://openstatic.org/projects/rms-cast-recorder/recordings_php.png)
+In the subdirectory php is a web interface for browsing and reviewing the recordings. All you need is a php capable web server.
+
+```php
+// Settings
+$recordingsRoot = '/mnt/Media/recordings';
+$PAGE_TITLE = 'Icecast Stream Recordings';
+
+// End Settings
+```
+
 ## Usage
 
 Once the jar is built you can run the recorder against either a Shoutcast/Icecast stream URL or audio from stdin.
-Recordings are broken into WAV files whenever the stream goes silent and are placed in day‑based folders.
+Recordings are broken into WAV files whenever the stream goes silent and are placed in day‑based folders. At the top of the file you will see two variables, set these accordingly.
 
 URL example:
 ```bash
