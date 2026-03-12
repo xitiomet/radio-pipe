@@ -281,6 +281,8 @@ public class StreamRecorder {
                 recordedFrames += n / frameSize;
                 silentFrames = 0;
             } else {
+                chunk.write(buffer, 0, n);
+                recordedFrames += n / frameSize;
                 silentFrames += n / frameSize;
                 if (silentFrames >= framesForSilence && chunk.size() > 0) {
                     log("SILENCE", ANSI_YELLOW,

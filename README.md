@@ -1,6 +1,6 @@
 ## RMSCastRecorder
 
-A tool for recording Ham Radio related shoutcast streams. This tool will listen to a shoutcast or icecast stream and only record when there is audio (rms activation)
+A tool for recording Ham Radio related shoutcast or icecast streams. This tool will listen to a shoutcast or icecast stream and only record when there is audio (rms activation)
 
 To compile this project please run:
 ```bash
