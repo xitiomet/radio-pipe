@@ -294,7 +294,7 @@ public class StreamRecorder {
                     log("SILENCE", ANSI_YELLOW,
                             String.format("Silence reached after %.1f s, closing clip.",
                                     recordedFrames / frameRate));
-                    if (soundFrames / frameRate > 1.0) { // only write clips that have at least 1 second of sound
+                    if ((soundFrames / frameRate) > 1.0) { // only write clips that have at least 1 second of sound
                         writeChunk(chunk.toByteArray(), format, chunkStartTime);
                     } else {
                         log("RECORD", ANSI_YELLOW,
