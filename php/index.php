@@ -630,6 +630,50 @@ if ($ajaxAction === 'stream') {
 		gap: 8px;
 	}
 
+	.recordings-controls {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 10px;
+		padding: 8px;
+		border-bottom: 1px solid #343434;
+		background-color: #202020;
+	}
+
+	body.theme-light .recordings-controls {
+		border-bottom-color: #d5dce5;
+		background-color: #f3f7fc;
+	}
+
+	.recordings-filter-label {
+		font-size: 13px;
+		white-space: nowrap;
+	}
+
+	.recordings-filter-input {
+		flex: 1 1 280px;
+		min-height: 34px;
+		padding: 6px 8px;
+		border: 1px solid #4a4a4a;
+		border-radius: 4px;
+		background-color: #141414;
+		color: #efefef;
+	}
+
+	body.theme-light .recordings-filter-input {
+		border-color: #b9c4d1;
+		background-color: #ffffff;
+		color: #1f2a34;
+	}
+
+	.autoplay-new-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 13px;
+		white-space: nowrap;
+	}
+
 	.status-text {
 		flex: 1 1 240px;
 	}
@@ -733,6 +777,20 @@ if ($ajaxAction === 'stream') {
 			padding: 8px;
 		}
 
+		.recordings-controls {
+			align-items: stretch;
+		}
+
+		.recordings-filter-label,
+		.autoplay-new-label {
+			width: 100%;
+		}
+
+		.recordings-filter-input {
+			width: 100%;
+			flex: 1 1 100%;
+		}
+
 		.recording-table {
 			min-width: 500px;
 		}
@@ -765,6 +823,11 @@ if ($ajaxAction === 'stream') {
 
 	<div class="recordings-list-col">
 		<div class="recordings-panel">
+			<div class="recordings-controls">
+				<label for="recordingsFilterInput" class="recordings-filter-label">Filter by name:</label>
+				<input type="text" id="recordingsFilterInput" class="recordings-filter-input" placeholder="Type to filter recordings..." autocomplete="off" />
+				<label class="autoplay-new-label" for="autoPlayNewCheckbox"><input type="checkbox" id="autoPlayNewCheckbox" /> Auto play new recordings</label>
+			</div>
 			<div class="recordings-list-wrap" id="recordingsList"></div>
 		</div>
 	</div>
@@ -773,9 +836,16 @@ if ($ajaxAction === 'stream') {
 <script type="text/javascript">
 var selectedPath = null;
 var recordingsByPath = {};
+var allRecordingsGroups = [];
 var refreshInProgress = false;
 var refreshEveryMs = 8000;
 var refreshTimerId = null;
+var hasLoadedRecordingsOnce = false;
+var pendingAutoPlayPaths = [];
+var shownRecordingsSizeBytes = 0;
+var totalRecordingsSizeBytes = 0;
+var lastStatusMessage = '';
+var lastStatusIsError = false;
 
 function applyTheme(themeName)
 {
@@ -831,13 +901,64 @@ function adjustRecordingsListHeight()
 	recordingsListWrap.style.height = Math.floor(availableHeight) + 'px';
 }
 
-function setStatus(text, isError)
+function formatBytesForStatus(bytes)
+{
+	var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+	var size = Number(bytes);
+	if (!isFinite(size) || size < 0) {
+		size = 0;
+	}
+
+	var unitIndex = 0;
+	while (size >= 1024 && unitIndex < (units.length - 1)) {
+		size = size / 1024;
+		unitIndex++;
+	}
+
+	if (unitIndex === 0) {
+		return String(Math.round(size)) + ' ' + units[unitIndex];
+	}
+
+	return size.toFixed(2) + ' ' + units[unitIndex];
+}
+
+function buildStatusContextText()
+{
+	return 'Shown size ' + formatBytesForStatus(shownRecordingsSizeBytes) + ' • Total size ' + formatBytesForStatus(totalRecordingsSizeBytes) + ' • Autoplay queue ' + pendingAutoPlayPaths.length;
+}
+
+function renderStatusText()
 {
 	var statusText = document.getElementById('statusText');
-	statusText.textContent = text;
+	if (!statusText) {
+		return;
+	}
+
+	var renderedText = lastStatusMessage;
+	if (!lastStatusIsError && renderedText !== '') {
+		renderedText += ' ' + buildStatusContextText() + '.';
+	}
+
+	statusText.textContent = renderedText;
 	var isLightTheme = document.body.classList.contains('theme-light');
-	statusText.style.color = isError ? (isLightTheme ? '#b00020' : '#ff8888') : (isLightTheme ? '#2d3742' : '#d4d4d4');
+	statusText.style.color = lastStatusIsError ? (isLightTheme ? '#b00020' : '#ff8888') : (isLightTheme ? '#2d3742' : '#d4d4d4');
 	adjustRecordingsListHeight();
+}
+
+function refreshStatusDetails()
+{
+	if (lastStatusMessage === '') {
+		return;
+	}
+
+	renderStatusText();
+}
+
+function setStatus(text, isError)
+{
+	lastStatusMessage = String(text || '');
+	lastStatusIsError = (isError === true);
+	renderStatusText();
 }
 
 function updateSelectedRowHighlight()
@@ -896,8 +1017,285 @@ function applySelectedToPlayer(autoPlay)
 function selectRecording(path, autoPlay)
 {
 	selectedPath = path;
+	removePendingAutoPlayPath(path);
 	updateSelectedRowHighlight();
 	applySelectedToPlayer(autoPlay === true);
+}
+
+function isAudioPlayerActivelyPlaying()
+{
+	var audioPlayer = document.getElementById('audioPlayer');
+	if (!audioPlayer) {
+		return false;
+	}
+
+	return !audioPlayer.paused && !audioPlayer.ended;
+}
+
+function getRecordingNameFilterValue()
+{
+	var filterInput = document.getElementById('recordingsFilterInput');
+	if (!filterInput) {
+		return '';
+	}
+
+	return String(filterInput.value || '').toLowerCase().trim();
+}
+
+function recordingMatchesFilter(recording, normalizedFilter)
+{
+	if (normalizedFilter === '') {
+		return true;
+	}
+
+	var prettyName = String(recording.name_pretty || '').toLowerCase();
+	var rawName = String(recording.name || '').toLowerCase();
+
+	return prettyName.indexOf(normalizedFilter) !== -1 || rawName.indexOf(normalizedFilter) !== -1;
+}
+
+function filterRecordingGroups(groups, normalizedFilter)
+{
+	if (!groups || groups.length === 0) {
+		return [];
+	}
+
+	if (normalizedFilter === '') {
+		return groups;
+	}
+
+	var filteredGroups = [];
+	for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+		var group = groups[groupIndex];
+		var filteredItems = [];
+
+		for (var itemIndex = 0; itemIndex < group.items.length; itemIndex++) {
+			var recording = group.items[itemIndex];
+			if (recordingMatchesFilter(recording, normalizedFilter)) {
+				filteredItems.push(recording);
+			}
+		}
+
+		if (filteredItems.length > 0) {
+			filteredGroups.push({
+				date: group.date,
+				items: filteredItems
+			});
+		}
+	}
+
+	return filteredGroups;
+}
+
+function countRecordingsInGroups(groups)
+{
+	var count = 0;
+	for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+		count += groups[groupIndex].items.length;
+	}
+
+	return count;
+}
+
+function sumRecordingSizeBytesInGroups(groups)
+{
+	var totalBytes = 0;
+	for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+		var items = groups[groupIndex].items;
+		for (var itemIndex = 0; itemIndex < items.length; itemIndex++) {
+			var sizeBytes = parseInt(items[itemIndex].size_bytes, 10);
+			if (!isNaN(sizeBytes) && sizeBytes > 0) {
+				totalBytes += sizeBytes;
+			}
+		}
+	}
+
+	return totalBytes;
+}
+
+function isAutoPlayNewEnabled()
+{
+	var checkbox = document.getElementById('autoPlayNewCheckbox');
+	return !!(checkbox && checkbox.checked);
+}
+
+function collectNewMatchingPaths(groups, previousByPath, normalizedFilter)
+{
+	var newPaths = [];
+
+	for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+		var group = groups[groupIndex];
+		for (var itemIndex = 0; itemIndex < group.items.length; itemIndex++) {
+			var recording = group.items[itemIndex];
+			if (previousByPath[recording.path]) {
+				continue;
+			}
+
+			if (recordingMatchesFilter(recording, normalizedFilter)) {
+				newPaths.push(recording.path);
+			}
+		}
+	}
+
+	return newPaths;
+}
+
+function removePendingAutoPlayPath(path)
+{
+	if (!path || pendingAutoPlayPaths.length === 0) {
+		return;
+	}
+
+	var beforeLength = pendingAutoPlayPaths.length;
+
+	var remainingPaths = [];
+	for (var index = 0; index < pendingAutoPlayPaths.length; index++) {
+		if (pendingAutoPlayPaths[index] !== path) {
+			remainingPaths.push(pendingAutoPlayPaths[index]);
+		}
+	}
+
+	pendingAutoPlayPaths = remainingPaths;
+	if (pendingAutoPlayPaths.length !== beforeLength) {
+		refreshStatusDetails();
+	}
+}
+
+function queuePendingAutoPlayPaths(paths)
+{
+	if (!paths || paths.length === 0) {
+		return 0;
+	}
+
+	var queuedCount = 0;
+	for (var index = 0; index < paths.length; index++) {
+		var path = paths[index];
+		if (!path || path === selectedPath) {
+			continue;
+		}
+
+		var alreadyQueued = false;
+		for (var pendingIndex = 0; pendingIndex < pendingAutoPlayPaths.length; pendingIndex++) {
+			if (pendingAutoPlayPaths[pendingIndex] === path) {
+				alreadyQueued = true;
+				break;
+			}
+		}
+
+		if (alreadyQueued) {
+			continue;
+		}
+
+		pendingAutoPlayPaths.push(path);
+		queuedCount++;
+	}
+
+	return queuedCount;
+}
+
+function tryStartPendingAutoPlay()
+{
+	var beforeQueueLength = pendingAutoPlayPaths.length;
+
+	if (!isAutoPlayNewEnabled()) {
+		return false;
+	}
+
+	if (pendingAutoPlayPaths.length === 0) {
+		return false;
+	}
+
+	if (isAudioPlayerActivelyPlaying()) {
+		return false;
+	}
+
+	var normalizedFilter = getRecordingNameFilterValue();
+	while (pendingAutoPlayPaths.length > 0) {
+		var nextPath = pendingAutoPlayPaths.shift();
+		if (!recordingsByPath[nextPath]) {
+			continue;
+		}
+
+		if (!recordingMatchesFilter(recordingsByPath[nextPath], normalizedFilter)) {
+			continue;
+		}
+
+		selectedPath = nextPath;
+		updateSelectedRowHighlight();
+		applySelectedToPlayer(true);
+		if (pendingAutoPlayPaths.length !== beforeQueueLength) {
+			refreshStatusDetails();
+		}
+		return true;
+	}
+
+	if (pendingAutoPlayPaths.length !== beforeQueueLength) {
+		refreshStatusDetails();
+	}
+
+	return false;
+}
+
+function onAutoPlayNewCheckboxChanged()
+{
+	if (!isAutoPlayNewEnabled()) {
+		if (pendingAutoPlayPaths.length > 0) {
+			pendingAutoPlayPaths = [];
+			refreshStatusDetails();
+		}
+		return;
+	}
+
+	tryStartPendingAutoPlay();
+}
+
+function onAudioPlayerEnded()
+{
+	tryStartPendingAutoPlay();
+}
+
+function applyCurrentFilterAndRender(autoPlay)
+{
+	var normalizedFilter = getRecordingNameFilterValue();
+	var filteredGroups = filterRecordingGroups(allRecordingsGroups, normalizedFilter);
+	shownRecordingsSizeBytes = sumRecordingSizeBytesInGroups(filteredGroups);
+	var visibleByPath = {};
+
+	for (var groupIndex = 0; groupIndex < filteredGroups.length; groupIndex++) {
+		var group = filteredGroups[groupIndex];
+		for (var itemIndex = 0; itemIndex < group.items.length; itemIndex++) {
+			var recording = group.items[itemIndex];
+			visibleByPath[recording.path] = true;
+		}
+	}
+
+	renderRecordings(filteredGroups);
+
+	if (selectedPath && !recordingsByPath[selectedPath]) {
+		selectedPath = null;
+	}
+
+	if (selectedPath && !visibleByPath[selectedPath] && !isAudioPlayerActivelyPlaying()) {
+		selectedPath = null;
+	}
+
+	if (!selectedPath && filteredGroups.length > 0 && filteredGroups[0].items.length > 0) {
+		selectedPath = filteredGroups[0].items[0].path;
+	}
+
+	updateSelectedRowHighlight();
+	applySelectedToPlayer(autoPlay === true);
+
+	return countRecordingsInGroups(filteredGroups);
+}
+
+function onFilterInputChanged()
+{
+	var shownCount = applyCurrentFilterAndRender(false);
+	tryStartPendingAutoPlay();
+	var normalizedFilter = getRecordingNameFilterValue();
+	var filterSuffix = normalizedFilter === '' ? '' : ' (filtered)';
+	setStatus(shownCount + ' recording(s) shown' + filterSuffix + '.', false);
 }
 
 function renderRecordings(groups)
@@ -1055,31 +1453,55 @@ function refreshRecordings(manualRefresh)
 			return;
 		}
 
+		var previousRecordingsByPath = recordingsByPath;
+		var computedTotalSizeBytes = 0;
 		recordingsByPath = {};
 		for (var groupIndex = 0; groupIndex < response.groups.length; groupIndex++) {
 			var group = response.groups[groupIndex];
 			for (var itemIndex = 0; itemIndex < group.items.length; itemIndex++) {
 				var recording = group.items[itemIndex];
 				recordingsByPath[recording.path] = recording;
+
+				var sizeBytes = parseInt(recording.size_bytes, 10);
+				if (!isNaN(sizeBytes) && sizeBytes > 0) {
+					computedTotalSizeBytes += sizeBytes;
+				}
 			}
+		}
+
+		totalRecordingsSizeBytes = computedTotalSizeBytes;
+
+		allRecordingsGroups = response.groups;
+
+		var normalizedFilter = getRecordingNameFilterValue();
+		var queuedMatchingCount = 0;
+		if (hasLoadedRecordingsOnce && isAutoPlayNewEnabled()) {
+			var newMatchingPaths = collectNewMatchingPaths(allRecordingsGroups, previousRecordingsByPath, normalizedFilter);
+			queuedMatchingCount = queuePendingAutoPlayPaths(newMatchingPaths);
 		}
 
 		if (selectedPath && !recordingsByPath[selectedPath]) {
 			selectedPath = null;
 		}
 
-		renderRecordings(response.groups);
-
-		if (!selectedPath && response.groups.length > 0 && response.groups[0].items.length > 0) {
-			selectedPath = response.groups[0].items[0].path;
-		}
-
-		updateSelectedRowHighlight();
-		applySelectedToPlayer(false);
+		var shownCount = applyCurrentFilterAndRender(false);
+		var startedQueuedPlayback = tryStartPendingAutoPlay();
 
 		var refreshedAt = new Date(response.generated_at * 1000).toLocaleTimeString();
 		var prefix = manualRefresh ? 'Refreshed. ' : '';
-		setStatus(prefix + response.count + ' recording(s) found. Last refresh ' + refreshedAt + '.', false);
+		var statusText = prefix + response.count + ' recording(s) found';
+		if (normalizedFilter !== '') {
+			statusText += ', ' + shownCount + ' shown';
+		}
+		statusText += '. Last refresh ' + refreshedAt + '.';
+		if (startedQueuedPlayback) {
+			statusText += ' Auto-playing newest queued recording.';
+		} else if (queuedMatchingCount > 0) {
+			statusText += ' Queued ' + queuedMatchingCount + ' new matching recording(s) for autoplay.';
+		}
+		setStatus(statusText, false);
+
+		hasLoadedRecordingsOnce = true;
 	};
 
 	xhr.open('GET', '?ajax=list&rnd=' + Math.random(), true);
@@ -1089,6 +1511,21 @@ function refreshRecordings(manualRefresh)
 function startRecordingsPage()
 {
 	initTheme();
+	var filterInput = document.getElementById('recordingsFilterInput');
+	if (filterInput) {
+		filterInput.addEventListener('input', onFilterInputChanged);
+	}
+
+	var autoPlayCheckbox = document.getElementById('autoPlayNewCheckbox');
+	if (autoPlayCheckbox) {
+		autoPlayCheckbox.addEventListener('change', onAutoPlayNewCheckboxChanged);
+	}
+
+	var audioPlayer = document.getElementById('audioPlayer');
+	if (audioPlayer) {
+		audioPlayer.addEventListener('ended', onAudioPlayerEnded);
+	}
+
 	adjustRecordingsListHeight();
 	refreshRecordings(false);
 	refreshTimerId = setInterval(function () {
