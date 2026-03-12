@@ -1,12 +1,14 @@
 ## RMSCastRecorder
 
-A tool for recording Ham Radio related shoutcast or icecast streams. This tool will listen to a shoutcast or icecast stream and only record when there is audio (rms activation)
+A tool for recording Ham Radio related shoutcast or icecast streams. This tool will listen to a shoutcast or icecast stream and only record when there is audio (root-mean-square activation) I found myself wishing i had an easy straightfoward way to record a stream without the long silences between transmissions. RMSCastRecorder will organize the produced wav files into folders by date, and the filename will include the stream title and timestamp.
 
-To compile this project please run:
-```bash
-$ mvn package
-```
-from a terminal.
+Example output with -o ./recordings
+
+A recording will be created as follows:
+
+`./recordings/2026-03-12/2026-03-12_024630_RadPi.wav`
+
+Regular builds can be found at https://openstatic.org/projects/rms-cast-recorder/ (scroll to the bottom)
 
 ## Usage
 
@@ -42,26 +44,26 @@ $ arecord -f S16_LE -c 1 -r 8000 -t raw - \
     -o ./recordings
 ```
 
-Options:
+## Options
 
-* `-u,--url <URL>` – stream URL to capture (mutually exclusive with `--stdin`)
-* `-i,--stdin` – read audio from stdin (mutually exclusive with `--url`)
-* `--stdin-raw` – treat stdin as raw PCM bytes (requires `--stdin`)
-* `--stdin-rate <HZ>` – raw stdin sample rate (default matches `--sample-rate`)
-* `--stdin-channels <N>` – raw stdin channels (default matches `--channels`)
-* `--stdin-bits <BITS>` – raw stdin bit depth (default matches `--bitrate`)
-* `--stdin-big-endian` – raw stdin byte order is big-endian (default little-endian)
-* `--stdin-unsigned` – raw stdin encoding is unsigned PCM (default signed PCM)
-* `-o,--out <DIR>` – base directory for recordings (default `./recordings`)
-* `-t,--threshold <DB>` – silence threshold in dB (default -50)
-* `-s,--silence <SECONDS>` – how long the signal must stay below threshold to
+* -u,--url <URL> – stream URL to capture (mutually exclusive with --stdin)
+* -i,--stdin – read audio from stdin (mutually exclusive with --url)
+* --stdin-raw – treat stdin as raw PCM bytes (requires --stdin)
+* --stdin-rate <HZ> – raw stdin sample rate (default matches --sample-rate)
+* --stdin-channels <N> – raw stdin channels (default matches --channels)
+* --stdin-bits <BITS> – raw stdin bit depth (default matches --bitrate)
+* --stdin-big-endian – raw stdin byte order is big-endian (default little-endian)
+* --stdin-unsigned – raw stdin encoding is unsigned PCM (default signed PCM)
+* -o,--out <DIR> – base directory for recordings (default ./recordings)
+* -t,--threshold <DB> – silence threshold in dB (default -50)
+* -s,--silence <SECONDS> – how long the signal must stay below threshold to
   end a clip (default 2)
-* `-r,--sample-rate <HZ>` – output sample rate in Hz (default `8000`)
-* `-c,--channels <N>` – output channels (`1` mono, `2` stereo; default `1`)
-* `-b,--bitrate <BITS>` – output PCM bit depth in bits (default `16`)
-* `-x,--on-write <PROGRAM>` – optional script/program to run each time a WAV is
-  written; if `{wav}` is omitted, the full WAV path is passed as argument 1
-* `-?,--help` – display help and exit
+* -r,--sample-rate <HZ> – output sample rate in Hz (default 8000)
+* -c,--channels <N> – output channels (1 mono, 2 stereo; default 1)
+* -b,--bitrate <BITS> – output PCM bit depth in bits (default 16)
+* -x,--on-write <PROGRAM> – optional script/program to run each time a WAV is
+  written; if {wav} is omitted, the full WAV path is passed as argument 1
+* -?,--help – display help and exit
 
 Exactly one input source is required: `--url` or `--stdin`.
 
@@ -74,3 +76,10 @@ Examples for `--on-write`:
 * `-x /usr/local/bin/on-clip-written.sh`
 * `-x "/usr/local/bin/on-clip-written.sh --tag repeater-a"` (WAV path is still arg1)
 * `-x "/usr/bin/python3 /opt/hooks/process_clip.py {wav} --mode fast"`
+
+
+To compile this project please run:
+```bash
+$ mvn package
+```
+from a terminal.

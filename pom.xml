@@ -6,7 +6,7 @@
   <version>1.0</version>
   <packaging>jar</packaging>
   <name>RMSCastRecorder</name>
-  <url>http://openstatic.org/</url>
+  <url>https://openstatic.org/projects/rms-cast-recorder/</url>
   <properties>
     <mainClass>org.openstatic.RMSCastRecorderMain</mainClass>
     <maven.compiler.source>17</maven.compiler.source>
@@ -14,6 +14,17 @@
     <imageName>rms-cast-recorder</imageName>
     <graalvm.version>22.1.0</graalvm.version>
     <skipNative>false</skipNative>
+    <skipDeb>false</skipDeb>
+    <skipLaunch4j>false</skipLaunch4j>
+    <windowsExeName>${project.artifactId}-${project.version}.exe</windowsExeName>
+    <windowsExeIcon>${project.basedir}/src/main/resources/icon.ico</windowsExeIcon>
+    <windowsBundleDir>${project.build.directory}/windows-bundle</windowsBundleDir>
+    <windowsJreSourceDir>${project.basedir}/jre-windows</windowsJreSourceDir>
+    <windowsFileVersion>1.0.0.0</windowsFileVersion>
+    <windowsProductVersion>1.0.0.0</windowsProductVersion>
+    <windowsVersionText>${project.version}</windowsVersionText>
+    <windowsCompanyName>OpenStatic.org</windowsCompanyName>
+    <windowsFileDescription>${project.name}</windowsFileDescription>
     <nativeArchSuffix>${os.arch}</nativeArchSuffix>
   </properties>
   <dependencies>
@@ -99,6 +110,62 @@
       </activation>
       <properties>
         <nativeArchSuffix>arm64</nativeArchSuffix>
+      </properties>
+    </profile>
+    <profile>
+      <id>windows-exe</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>com.akathist.maven.plugins.launch4j</groupId>
+            <artifactId>launch4j-maven-plugin</artifactId>
+            <version>2.5.0</version>
+            <executions>
+              <execution>
+                <id>build-windows-exe</id>
+                <phase>package</phase>
+                <goals>
+                  <goal>launch4j</goal>
+                </goals>
+                <configuration>
+                  <skip>${skipLaunch4j}</skip>
+                  <headerType>console</headerType>
+                  <jar>${project.build.directory}/${project.build.finalName}.jar</jar>
+                  <outfile>${project.build.directory}/${windowsExeName}</outfile>
+                  <icon>${windowsExeIcon}</icon>
+                  <errTitle>${project.name}</errTitle>
+                  <classPath>
+                    <mainClass>${mainClass}</mainClass>
+                  </classPath>
+                  <versionInfo>
+                    <fileVersion>${windowsFileVersion}</fileVersion>
+                    <txtFileVersion>${windowsVersionText}</txtFileVersion>
+                    <productVersion>${windowsProductVersion}</productVersion>
+                    <txtProductVersion>${windowsVersionText}</txtProductVersion>
+                    <fileDescription>${windowsFileDescription}</fileDescription>
+                    <copyright>${windowsCompanyName}</copyright>
+                    <productName>${project.name}</productName>
+                    <companyName>${windowsCompanyName}</companyName>
+                    <internalName>${project.artifactId}</internalName>
+                    <originalFilename>${windowsExeName}</originalFilename>
+                  </versionInfo>
+                  <jre>
+                    <path>jre</path>
+                    <minVersion>${maven.compiler.target}</minVersion>
+                  </jre>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <profile>
+      <id>windows-native</id>
+      <properties>
+        <skipNative>false</skipNative>
+        <skipDeb>true</skipDeb>
+        <imageName>${project.artifactId}-${project.version}-native</imageName>
       </properties>
     </profile>
   </profiles>
@@ -192,7 +259,7 @@
                         <goal>jdeb</goal>
                     </goals>
                     <configuration>
-                        <skip>${skipNative}</skip>
+                        <skip>${skipDeb}</skip>
                         <verbose>true</verbose>
                         <snapshotExpand>true</snapshotExpand>
                         <!-- expand "SNAPSHOT" to what is in the "USER" env variable -->
@@ -244,6 +311,7 @@
                         <goal>jdeb</goal>
                     </goals>
                     <configuration>
+                    <skip>${skipDeb}</skip>
                         <verbose>true</verbose>
                         <snapshotExpand>true</snapshotExpand>
                         <!-- expand "SNAPSHOT" to what is in the "USER" env variable -->
