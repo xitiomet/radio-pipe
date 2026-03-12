@@ -267,6 +267,7 @@ public class StreamRecorder {
         long recordedFrames = 0;
         long silentFrames = 0;
         long chunkStartTime = 0;
+        boolean activelyRecording = false;
 
         int n;
         while (running && (n = din.read(buffer)) != -1) {
@@ -280,9 +281,12 @@ public class StreamRecorder {
                 chunk.write(buffer, 0, n);
                 recordedFrames += n / frameSize;
                 silentFrames = 0;
+                activelyRecording = true;
             } else {
-                chunk.write(buffer, 0, n);
-                recordedFrames += n / frameSize;
+                if (activelyRecording) {
+                    chunk.write(buffer, 0, n);
+                    recordedFrames += n / frameSize;
+                }
                 silentFrames += n / frameSize;
                 if (silentFrames >= framesForSilence && chunk.size() > 0) {
                     log("SILENCE", ANSI_YELLOW,
@@ -290,6 +294,7 @@ public class StreamRecorder {
                                     recordedFrames / frameRate));
                     writeChunk(chunk.toByteArray(), format, chunkStartTime);
                     chunk.reset();
+                    activelyRecording = false;
                     recordedFrames = 0;
                     silentFrames = 0;
                 }
