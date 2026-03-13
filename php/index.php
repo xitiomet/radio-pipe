@@ -145,6 +145,101 @@ function decodeSynchsafeInt(string $bytes): int
 		| (ord($bytes[3]) & 0x7F);
 }
 
+function emptySourceMetadata(): array
+{
+	return array(
+		'comment' => null,
+		'url' => null,
+	);
+}
+
+function extractSourceMetadataFromText(string $text): array
+{
+	if ($text === '') {
+		return emptySourceMetadata();
+	}
+
+	if (!preg_match('/(Source\s*URL:\s*(https?:\/\/[^\s"\'<>\x00]+))/i', $text, $matches)) {
+		return emptySourceMetadata();
+	}
+
+	$detectedUrl = trim((string)$matches[2]);
+	$detectedUrl = rtrim($detectedUrl, ".,;)]}\x00");
+	if ($detectedUrl === '' || filter_var($detectedUrl, FILTER_VALIDATE_URL) === false) {
+		return emptySourceMetadata();
+	}
+
+	return array(
+		'comment' => 'Source URL: ' . $detectedUrl,
+		'url' => $detectedUrl,
+	);
+}
+
+function extractSourceMetadataFromChunk(string $chunk): array
+{
+	if ($chunk === '') {
+		return emptySourceMetadata();
+	}
+
+	$directMatch = extractSourceMetadataFromText($chunk);
+	if ($directMatch['url'] !== null) {
+		return $directMatch;
+	}
+
+	if (strpos($chunk, "\x00") !== false) {
+		$withoutNullBytes = str_replace("\x00", '', $chunk);
+		$collapsedMatch = extractSourceMetadataFromText($withoutNullBytes);
+		if ($collapsedMatch['url'] !== null) {
+			return $collapsedMatch;
+		}
+	}
+
+	return emptySourceMetadata();
+}
+
+function detectSourceMetadataForRecording(string $fullPath, int $fileSize): array
+{
+	$emptyMetadata = emptySourceMetadata();
+	if ($fileSize <= 0) {
+		return $emptyMetadata;
+	}
+
+	$handle = fopen($fullPath, 'rb');
+	if ($handle === false) {
+		return $emptyMetadata;
+	}
+
+	$headBytesToRead = min($fileSize, 131072);
+	if ($headBytesToRead > 0) {
+		$headChunk = fread($handle, $headBytesToRead);
+		if ($headChunk !== false) {
+			$headMetadata = extractSourceMetadataFromChunk((string)$headChunk);
+			if ($headMetadata['url'] !== null) {
+				fclose($handle);
+				return $headMetadata;
+			}
+		}
+	}
+
+	$tailBytesToRead = min($fileSize, 16384);
+	if ($tailBytesToRead > 0) {
+		$tailOffset = max(0, $fileSize - $tailBytesToRead);
+		fseek($handle, $tailOffset);
+		$tailChunk = fread($handle, $tailBytesToRead);
+		if ($tailChunk !== false) {
+			$tailMetadata = extractSourceMetadataFromChunk((string)$tailChunk);
+			if ($tailMetadata['url'] !== null) {
+				fclose($handle);
+				return $tailMetadata;
+			}
+		}
+	}
+
+	fclose($handle);
+
+	return $emptyMetadata;
+}
+
 function estimateMp3DurationSeconds(string $fullPath, int $fileSize): ?float
 {
 	$handle = fopen($fullPath, 'rb');
@@ -525,6 +620,7 @@ function listRecordings(string $rootDirectory, array $allowedExtensions): array
 		$parsedTimestamp = parseRecordingTimestamp($relativePath, $modifiedAt);
 		$sizeBytes = (int)$fileInfo->getSize();
 		$durationSeconds = estimateRecordingDurationSeconds($fullPath, $sizeBytes, $extension);
+		$sourceMetadata = detectSourceMetadataForRecording($fullPath, $sizeBytes);
 
 		$items[] = array(
 			'path' => $relativePath,
@@ -540,6 +636,8 @@ function listRecordings(string $rootDirectory, array $allowedExtensions): array
 			'size_human' => formatBytes($sizeBytes),
 			'duration_seconds' => $durationSeconds,
 			'duration_display' => formatDuration($durationSeconds),
+			'metadata_comment' => $sourceMetadata['comment'],
+			'source_url' => $sourceMetadata['url'],
 		);
 	}
 
@@ -1029,9 +1127,16 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 	}
 
 	.recording-content-type {
-		width: 120px;
+		width: 50px;
+		text-align: center;
 		white-space: nowrap;
 		font-family: monospace;
+	}
+
+	.recording-table th.recording-content-type,
+	.recording-table td.recording-content-type {
+		padding-left: 3px;
+		padding-right: 3px;
 	}
 
 	.recording-download {
@@ -1493,6 +1598,42 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 		flex: 0 0 auto;
 	}
 
+	.recordings-pagination {
+		display: flex;
+		justify-content: center;
+		padding: 12px 8px 4px;
+	}
+
+	.previous-week-button {
+		min-height: 36px;
+		padding: 8px 14px;
+		border: 1px solid #4a4a4a;
+		border-radius: 999px;
+		background-color: #242424;
+		color: #f2f2f2;
+		cursor: pointer;
+		font-weight: bold;
+	}
+
+	body.theme-light .previous-week-button {
+		border-color: #b9c4d1;
+		background-color: #ffffff;
+		color: #1f2a34;
+	}
+
+	.previous-week-button:hover:enabled {
+		background-color: #353535;
+	}
+
+	body.theme-light .previous-week-button:hover:enabled {
+		background-color: #edf3fb;
+	}
+
+	.previous-week-button:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+
 	body.theme-light .recordings-filter-datetime {
 		border-color: #b9c4d1;
 		background-color: #ffffff;
@@ -1520,9 +1661,44 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 		margin-bottom: 10px;
 	}
 
-	#downloadLink {
-		display: inline-block;
+	.selected-recording-actions {
+		display: none;
 		margin-top: 6px;
+		gap: 8px;
+		align-items: center;
+		width: 100%;
+	}
+
+	.selected-recording-action-button {
+		flex: 1 1 0;
+		min-width: 0;
+		max-width: 100%;
+		text-align: center;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.selected-recording-action-button.is-live {
+		font-weight: bold;
+		letter-spacing: 0.02em;
+		border-color: #7a1f1f;
+		background-color: #5b1717;
+		color: #ffeaea;
+	}
+
+	.selected-recording-action-button.is-live:hover {
+		background-color: #742020;
+	}
+
+	body.theme-light .selected-recording-action-button.is-live {
+		border-color: #b00020;
+		background-color: #b00020;
+		color: #ffffff;
+	}
+
+	body.theme-light .selected-recording-action-button.is-live:hover {
+		background-color: #8f0019;
 	}
 
 	#selectedTitle,
@@ -1670,7 +1846,10 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 				</div>
 			</div>
 			<audio id="audioPlayer" preload="metadata"></audio>
-			<a id="downloadLink" href="#" style="display: none;">Download selected recording</a>
+			<div class="selected-recording-actions" id="selectedRecordingActions">
+				<button type="button" id="downloadSelectedButton" class="refresh-button selected-recording-action-button" style="display: none;">Download selected recording</button>
+				<button type="button" id="listenLiveButton" class="refresh-button selected-recording-action-button" aria-pressed="false" style="display: none;">Listen live</button>
+			</div>
 		</div>
 	</div>
 
@@ -1900,6 +2079,7 @@ function updateCustomPlayerUi()
 	var seekBar = document.getElementById('audioSeekBar');
 	var currentTimeLabel = document.getElementById('audioCurrentTime');
 	var durationLabel = document.getElementById('audioDuration');
+	var listenLiveButton = document.getElementById('listenLiveButton');
 
 	if (!audioPlayer || !customPlayer || !playPauseButton || !skipBackButton || !skipForwardButton || !seekBar || !currentTimeLabel || !durationLabel) {
 		return;
@@ -1938,6 +2118,20 @@ function updateCustomPlayerUi()
 	}
 
 	currentTimeLabel.textContent = formatPlaybackClock(currentTime);
+
+	if (listenLiveButton) {
+		var selectedRecording = (selectedPath && recordingsByPath[selectedPath]) ? recordingsByPath[selectedPath] : null;
+		var isLiveMode = hasSource && audioPlayer.getAttribute('data-mode') === 'live';
+		var liveButtonLabel = selectedRecording ? buildListenLiveButtonLabel(selectedRecording) : 'Listen Live';
+		listenLiveButton.classList.toggle('is-live', isLiveMode);
+		listenLiveButton.setAttribute('aria-pressed', isLiveMode ? 'true' : 'false');
+		listenLiveButton.textContent = liveButtonLabel;
+		listenLiveButton.setAttribute('title', liveButtonLabel + (isLiveMode ? ' (Currently playing live source)' : ' (Play live source in built-in player)'));
+	}
+
+	if (selectedPath && recordingsByPath[selectedPath]) {
+		renderSelectedPlaybackSummary(recordingsByPath[selectedPath], audioPlayer);
+	}
 
 	customPlayer.classList.toggle('is-empty', !hasSource);
 	customPlayer.classList.toggle('is-playing', hasSource && !audioPlayer.paused);
@@ -2100,18 +2294,205 @@ function updateSelectedRowHighlight()
 	}
 }
 
-function applySelectedToPlayer(autoPlay)
+function normalizeLiveSourceUrl(urlValue)
+{
+	var normalizedUrl = String(urlValue || '').trim();
+	if (normalizedUrl === '') {
+		return '';
+	}
+
+	normalizedUrl = normalizedUrl.replace(/[.,;)\]}]+$/, '');
+	if (!/^https?:\/\//i.test(normalizedUrl)) {
+		return '';
+	}
+
+	return normalizedUrl;
+}
+
+function getLiveSourceUrlFromRecording(recording)
+{
+	if (!recording) {
+		return '';
+	}
+
+	if (typeof recording.metadata_comment === 'string' && recording.metadata_comment !== '') {
+		var commentMatch = recording.metadata_comment.match(/Source\s*URL:\s*(https?:\/\/[^\s"'<>]+)/i);
+		if (commentMatch && commentMatch[1]) {
+			var parsedFromComment = normalizeLiveSourceUrl(commentMatch[1]);
+			if (parsedFromComment !== '') {
+				return parsedFromComment;
+			}
+		}
+	}
+
+	if (typeof recording.source_url === 'string') {
+		return normalizeLiveSourceUrl(recording.source_url);
+	}
+
+	return '';
+}
+
+function getRecordingFileName(recording)
+{
+	if (!recording) {
+		return 'recording';
+	}
+
+	var fileName = String(recording.name || '').trim();
+	if (fileName !== '') {
+		return fileName;
+	}
+
+	var pathValue = String(recording.path || '').trim();
+	if (pathValue !== '') {
+		var pathParts = pathValue.split('/');
+		if (pathParts.length > 0) {
+			return String(pathParts[pathParts.length - 1] || 'recording');
+		}
+	}
+
+	return 'recording';
+}
+
+function getRecordingStreamTitle(recording)
+{
+	if (!recording) {
+		return 'Stream';
+	}
+
+	var streamTitle = String(recording.name_pretty || '').trim();
+	if (streamTitle !== '') {
+		return streamTitle;
+	}
+
+	return getRecordingFileName(recording);
+}
+
+function buildDownloadButtonLabel(recording)
+{
+	return 'Download (' + getRecordingFileName(recording) + ')';
+}
+
+function buildListenLiveButtonLabel(recording)
+{
+	return 'Listen Live - ' + getRecordingStreamTitle(recording);
+}
+
+function renderSelectedPlaybackSummary(recording, audioPlayer)
 {
 	var titleElement = document.getElementById('selectedTitle');
 	var metaElement = document.getElementById('selectedMeta');
-	var downloadLink = document.getElementById('downloadLink');
+	if (!titleElement || !metaElement || !recording) {
+		return;
+	}
+
+	var isLiveMode = false;
+	if (audioPlayer) {
+		isLiveMode = (audioPlayer.getAttribute('data-mode') === 'live' && audioPlayer.getAttribute('data-path') === recording.path);
+	}
+
+	if (isLiveMode) {
+		var liveSourceUrl = getLiveSourceUrlFromRecording(recording);
+		titleElement.textContent = 'LIVE - ' + recording.name_pretty;
+		metaElement.textContent = 'Source URL: ' + (liveSourceUrl !== '' ? liveSourceUrl : 'Unavailable') + ' • ' + recording.path;
+		if (recording.content_type) {
+			metaElement.textContent += ' • ' + recording.content_type;
+		}
+		return;
+	}
+
+	titleElement.textContent = recording.time_display + ' - ' + recording.name_pretty;
+	metaElement.textContent = recording.path + ' • ' + recording.duration_display + ' • ' + recording.size_human;
+	if (recording.content_type) {
+		metaElement.textContent += ' • ' + recording.content_type;
+	}
+}
+
+function playAudioElement(audioPlayer)
+{
+	if (!audioPlayer) {
+		return;
+	}
+
+	var playPromise = audioPlayer.play();
+	if (playPromise && typeof playPromise.catch === 'function') {
+		playPromise.catch(function () {
+		});
+	}
+}
+
+function onDownloadSelectedButtonClicked()
+{
+	if (!selectedPath || !recordingsByPath[selectedPath]) {
+		return;
+	}
+
+	var recording = recordingsByPath[selectedPath];
+	var downloadUrl = '?ajax=stream&file=' + encodeURIComponent(recording.path) + '&download=1&v=' + recording.mtime;
+	window.location.href = downloadUrl;
+}
+
+function onListenLiveButtonClicked()
+{
+	if (!selectedPath || !recordingsByPath[selectedPath]) {
+		return;
+	}
+
+	var recording = recordingsByPath[selectedPath];
+	var liveSourceUrl = getLiveSourceUrlFromRecording(recording);
+	if (liveSourceUrl === '') {
+		return;
+	}
+
+	var audioPlayer = document.getElementById('audioPlayer');
+	if (!audioPlayer) {
+		return;
+	}
+
+	var currentMode = audioPlayer.getAttribute('data-mode');
+	var currentLiveUrl = audioPlayer.getAttribute('data-live-url');
+	if (currentMode !== 'live' || currentLiveUrl !== liveSourceUrl) {
+		audioPlayer.setAttribute('data-path', recording.path);
+		audioPlayer.setAttribute('data-mode', 'live');
+		audioPlayer.setAttribute('data-live-url', liveSourceUrl);
+		audioPlayer.src = liveSourceUrl;
+		audioPlayer.load();
+	}
+
+	playAudioElement(audioPlayer);
+	updateCustomPlayerUi();
+}
+
+function applySelectedToPlayer(autoPlay, forceRecordingSource)
+{
+	var titleElement = document.getElementById('selectedTitle');
+	var metaElement = document.getElementById('selectedMeta');
+	var actionsWrap = document.getElementById('selectedRecordingActions');
+	var downloadButton = document.getElementById('downloadSelectedButton');
+	var listenLiveButton = document.getElementById('listenLiveButton');
 	var audioPlayer = document.getElementById('audioPlayer');
 
 	if (!selectedPath || !recordingsByPath[selectedPath]) {
 		titleElement.textContent = 'No recording selected';
 		metaElement.textContent = 'Select a recording to begin playback.';
-		downloadLink.style.display = 'none';
+		if (actionsWrap) {
+			actionsWrap.style.display = 'none';
+		}
+		if (downloadButton) {
+			downloadButton.textContent = 'Download';
+			downloadButton.setAttribute('title', 'Download selected recording');
+			downloadButton.style.display = 'none';
+		}
+		if (listenLiveButton) {
+			listenLiveButton.classList.remove('is-live');
+			listenLiveButton.textContent = 'Listen Live';
+			listenLiveButton.setAttribute('aria-pressed', 'false');
+			listenLiveButton.setAttribute('title', 'Listen live source');
+			listenLiveButton.style.display = 'none';
+		}
 		audioPlayer.removeAttribute('data-path');
+		audioPlayer.removeAttribute('data-mode');
+		audioPlayer.removeAttribute('data-live-url');
 		audioPlayer.removeAttribute('src');
 		audioPlayer.load();
 		updateCustomPlayerUi();
@@ -2119,29 +2500,54 @@ function applySelectedToPlayer(autoPlay)
 	}
 
 	var recording = recordingsByPath[selectedPath];
-	titleElement.textContent = recording.time_display + ' - ' + recording.name_pretty;
-	metaElement.textContent = recording.path + ' • ' + recording.duration_display + ' • ' + recording.size_human;
-	if (recording.content_type) {
-		metaElement.textContent += ' • ' + recording.content_type;
-	}
 
 	var streamUrl = '?ajax=stream&file=' + encodeURIComponent(recording.path) + '&v=' + recording.mtime;
-	var downloadUrl = '?ajax=stream&file=' + encodeURIComponent(recording.path) + '&download=1&v=' + recording.mtime;
-	if (audioPlayer.getAttribute('data-path') !== recording.path) {
+	var currentMode = audioPlayer.getAttribute('data-mode');
+	var currentPath = audioPlayer.getAttribute('data-path');
+	var isLiveModeForSelectedRecording = (currentMode === 'live' && currentPath === recording.path);
+	var shouldLoadRecordingStream = (forceRecordingSource === true) || (!isLiveModeForSelectedRecording && currentPath !== recording.path);
+
+	if (shouldLoadRecordingStream) {
 		audioPlayer.setAttribute('data-path', recording.path);
+		audioPlayer.setAttribute('data-mode', 'recording');
+		audioPlayer.removeAttribute('data-live-url');
 		audioPlayer.src = streamUrl;
 		audioPlayer.load();
+	} else if (!isLiveModeForSelectedRecording) {
+		audioPlayer.setAttribute('data-path', recording.path);
+		audioPlayer.setAttribute('data-mode', 'recording');
+		audioPlayer.removeAttribute('data-live-url');
 	}
 
-	downloadLink.href = downloadUrl;
-	downloadLink.style.display = 'inline-block';
+	if (actionsWrap) {
+		actionsWrap.style.display = 'flex';
+	}
+
+	if (downloadButton) {
+		var downloadButtonLabel = buildDownloadButtonLabel(recording);
+		downloadButton.textContent = downloadButtonLabel;
+		downloadButton.setAttribute('title', downloadButtonLabel);
+		downloadButton.style.display = 'inline-block';
+	}
+
+	if (listenLiveButton) {
+		var liveSourceUrl = getLiveSourceUrlFromRecording(recording);
+		var listenLiveLabel = buildListenLiveButtonLabel(recording);
+		listenLiveButton.classList.remove('is-live');
+		listenLiveButton.textContent = listenLiveLabel;
+		listenLiveButton.setAttribute('aria-pressed', 'false');
+		listenLiveButton.setAttribute('title', listenLiveLabel + ' (Play live source in built-in player)');
+		if (liveSourceUrl !== '') {
+			listenLiveButton.style.display = 'inline-block';
+		} else {
+			listenLiveButton.style.display = 'none';
+		}
+	}
+
+	renderSelectedPlaybackSummary(recording, audioPlayer);
 
 	if (autoPlay === true) {
-		var playPromise = audioPlayer.play();
-		if (playPromise && typeof playPromise.catch === 'function') {
-			playPromise.catch(function () {
-			});
-		}
+		playAudioElement(audioPlayer);
 	}
 
 	updateCustomPlayerUi();
@@ -2149,10 +2555,24 @@ function applySelectedToPlayer(autoPlay)
 
 function selectRecording(path, autoPlay)
 {
+	var forceRecordingSource = (selectedPath === path);
 	selectedPath = path;
 	removePendingAutoPlayPath(path);
 	updateSelectedRowHighlight();
-	applySelectedToPlayer(autoPlay === true);
+	applySelectedToPlayer(autoPlay === true, forceRecordingSource);
+}
+
+function initializeSelectedRecordingActionButtons()
+{
+	var downloadButton = document.getElementById('downloadSelectedButton');
+	if (downloadButton) {
+		downloadButton.addEventListener('click', onDownloadSelectedButtonClicked);
+	}
+
+	var listenLiveButton = document.getElementById('listenLiveButton');
+	if (listenLiveButton) {
+		listenLiveButton.addEventListener('click', onListenLiveButtonClicked);
+	}
 }
 
 function isAudioPlayerActivelyPlaying()
@@ -2175,6 +2595,215 @@ function getRecordingNameFilterValue()
 	return String(filterInput.value || '').toLowerCase().trim();
 }
 
+function parseDateTimeInputValue(inputValue)
+{
+	if (!inputValue) {
+		return null;
+	}
+
+	var parsedDate = new Date(inputValue);
+	if (isNaN(parsedDate.getTime())) {
+		return null;
+	}
+
+	return parsedDate;
+}
+
+function parseDateOnlyValue(dateValue)
+{
+	if (!dateValue) {
+		return null;
+	}
+
+	var parts = String(dateValue).split('-');
+	if (parts.length !== 3) {
+		return null;
+	}
+
+	var year = parseInt(parts[0], 10);
+	var monthIndex = parseInt(parts[1], 10) - 1;
+	var day = parseInt(parts[2], 10);
+	if (isNaN(year) || isNaN(monthIndex) || isNaN(day)) {
+		return null;
+	}
+
+	var parsedDate = new Date(year, monthIndex, day);
+	if (isNaN(parsedDate.getTime())) {
+		return null;
+	}
+
+	return parsedDate;
+}
+
+function formatDateTimeLocalValue(date)
+{
+	if (!date || isNaN(date.getTime())) {
+		return '';
+	}
+
+	var pad = function (value) {
+		return String(value).padStart(2, '0');
+	};
+
+	return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + 'T' + pad(date.getHours()) + ':' + pad(date.getMinutes());
+}
+
+function shiftDateByDays(date, dayDelta)
+{
+	var shiftedDate = new Date(date.getTime());
+	shiftedDate.setDate(shiftedDate.getDate() + dayDelta);
+	return shiftedDate;
+}
+
+function shiftDateByMinutes(date, minuteDelta)
+{
+	var shiftedDate = new Date(date.getTime());
+	shiftedDate.setMinutes(shiftedDate.getMinutes() + minuteDelta);
+	return shiftedDate;
+}
+
+function buildRecordingDateHeading(dateValue, itemCount)
+{
+	var headingText = String(dateValue || '');
+	var parsedDate = parseDateOnlyValue(dateValue);
+	if (parsedDate) {
+		var weekdayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+		headingText = weekdayNames[parsedDate.getDay()] + ' ' + headingText;
+	}
+
+	return headingText + ' (' + itemCount + ')';
+}
+
+function getRecordingFormatLabel(recording)
+{
+	var fileName = '';
+	if (recording) {
+		fileName = String(recording.name || recording.path || '');
+	}
+
+	var lastDotIndex = fileName.lastIndexOf('.');
+	if (lastDotIndex === -1 || lastDotIndex === (fileName.length - 1)) {
+		return 'N/A';
+	}
+
+	return fileName.substring(lastDotIndex + 1).toUpperCase();
+}
+
+function getOldestRecordingInGroups(groups)
+{
+	if (!groups || groups.length === 0) {
+		return null;
+	}
+
+	var lastGroup = groups[groups.length - 1];
+	if (!lastGroup || !lastGroup.items || lastGroup.items.length === 0) {
+		return null;
+	}
+
+	return lastGroup.items[lastGroup.items.length - 1];
+}
+
+function buildPreviousWeekRange()
+{
+	var startInput = document.getElementById('recordingsFilterStart');
+	var endInput = document.getElementById('recordingsFilterEnd');
+	var currentStart = startInput ? parseDateTimeInputValue(startInput.value) : null;
+	var currentEnd = endInput ? parseDateTimeInputValue(endInput.value) : null;
+	var nextStart = null;
+	var nextEnd = null;
+
+	if (currentStart && currentEnd) {
+		nextStart = shiftDateByDays(currentStart, -7);
+		nextEnd = shiftDateByDays(currentEnd, -7);
+	} else if (currentStart) {
+		nextStart = shiftDateByDays(currentStart, -7);
+		nextEnd = shiftDateByMinutes(currentStart, -1);
+	} else if (currentEnd) {
+		nextStart = shiftDateByDays(currentEnd, -14);
+		nextEnd = shiftDateByDays(currentEnd, -7);
+	} else {
+		var normalizedFilter = getRecordingNameFilterValue();
+		var currentDateRange = getDateRangeFilter();
+		var visibleGroups = filterRecordingGroups(allRecordingsGroups, normalizedFilter, currentDateRange);
+		var oldestVisibleRecording = getOldestRecordingInGroups(visibleGroups);
+		if (!oldestVisibleRecording) {
+			return null;
+		}
+
+		var oldestVisibleTimestamp = parseInt(oldestVisibleRecording.timestamp, 10);
+		if (isNaN(oldestVisibleTimestamp) || oldestVisibleTimestamp <= 0) {
+			return null;
+		}
+
+		var oldestVisibleDate = new Date(oldestVisibleTimestamp * 1000);
+		if (isNaN(oldestVisibleDate.getTime())) {
+			return null;
+		}
+
+		nextStart = shiftDateByDays(oldestVisibleDate, -7);
+		nextEnd = shiftDateByMinutes(oldestVisibleDate, -1);
+	}
+
+	if (!nextStart || !nextEnd || isNaN(nextStart.getTime()) || isNaN(nextEnd.getTime())) {
+		return null;
+	}
+
+	return {
+		startDate: nextStart,
+		endDate: nextEnd,
+		startTs: Math.floor(nextStart.getTime() / 1000),
+		endTs: Math.floor(nextEnd.getTime() / 1000)
+	};
+}
+
+function hasRecordingsForFilterRange(normalizedFilter, dateRange)
+{
+	if (!dateRange || dateRange.startTs === null || dateRange.endTs === null) {
+		return false;
+	}
+
+	for (var groupIndex = 0; groupIndex < allRecordingsGroups.length; groupIndex++) {
+		var group = allRecordingsGroups[groupIndex];
+		for (var itemIndex = 0; itemIndex < group.items.length; itemIndex++) {
+			var recording = group.items[itemIndex];
+			if (!recordingMatchesFilter(recording, normalizedFilter)) {
+				continue;
+			}
+
+			if (recordingMatchesDateRange(recording, dateRange)) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+function goToPreviousWeek()
+{
+	var previousWeekRange = buildPreviousWeekRange();
+	if (!previousWeekRange) {
+		return;
+	}
+
+	var startInput = document.getElementById('recordingsFilterStart');
+	var endInput = document.getElementById('recordingsFilterEnd');
+	if (startInput) {
+		startInput.value = formatDateTimeLocalValue(previousWeekRange.startDate);
+	}
+
+	if (endInput) {
+		endInput.value = formatDateTimeLocalValue(previousWeekRange.endDate);
+	}
+
+	var recordingsList = document.getElementById('recordingsList');
+	if (recordingsList) {
+		recordingsList.scrollTop = 0;
+	}
+
+	onFilterInputChanged();
+}
+
 function getDateRangeFilter()
 {
 	var startInput = document.getElementById('recordingsFilterStart');
@@ -2183,15 +2812,15 @@ function getDateRangeFilter()
 	var endTs = null;
 
 	if (startInput && startInput.value !== '') {
-		var startDate = new Date(startInput.value);
-		if (!isNaN(startDate.getTime())) {
+		var startDate = parseDateTimeInputValue(startInput.value);
+		if (startDate) {
 			startTs = Math.floor(startDate.getTime() / 1000);
 		}
 	}
 
 	if (endInput && endInput.value !== '') {
-		var endDate = new Date(endInput.value);
-		if (!isNaN(endDate.getTime())) {
+		var endDate = parseDateTimeInputValue(endInput.value);
+		if (endDate) {
 			endTs = Math.floor(endDate.getTime() / 1000);
 		}
 	}
@@ -2621,7 +3250,7 @@ function renderRecordings(groups)
 
 		var header = document.createElement('div');
 		header.className = 'recording-date';
-		header.textContent = group.date + ' (' + group.items.length + ')';
+		header.textContent = buildRecordingDateHeading(group.date, group.items.length);
 		recordingsList.appendChild(header);
 
 		var table = document.createElement('table');
@@ -2648,7 +3277,7 @@ function renderRecordings(groups)
 
 		var contentTypeHead = document.createElement('th');
 		contentTypeHead.className = 'recording-content-type';
-		contentTypeHead.textContent = 'Content-Type';
+		contentTypeHead.textContent = 'Format';
 
 		var sizeHead = document.createElement('th');
 		sizeHead.className = 'recording-size';
@@ -2661,9 +3290,9 @@ function renderRecordings(groups)
 		headRow.appendChild(dateHead);
 		headRow.appendChild(timeHead);
 		headRow.appendChild(nameHead);
+		headRow.appendChild(sizeHead);
 		headRow.appendChild(contentTypeHead);
 		headRow.appendChild(durationHead);
-		headRow.appendChild(sizeHead);
 		headRow.appendChild(downloadHead);
 		tableHead.appendChild(headRow);
 		table.appendChild(tableHead);
@@ -2700,7 +3329,7 @@ function renderRecordings(groups)
 
 			var contentTypeCell = document.createElement('td');
 			contentTypeCell.className = 'recording-content-type';
-			contentTypeCell.textContent = recording.content_type ? recording.content_type : 'audio/unknown';
+			contentTypeCell.textContent = getRecordingFormatLabel(recording);
 
 			var sizeCell = document.createElement('td');
 			sizeCell.className = 'recording-size';
@@ -2722,9 +3351,9 @@ function renderRecordings(groups)
 			row.appendChild(dateCell);
 			row.appendChild(timeCell);
 			row.appendChild(nameCell);
+			row.appendChild(sizeCell);
 			row.appendChild(contentTypeCell);
 			row.appendChild(durationCell);
-			row.appendChild(sizeCell);
 			row.appendChild(downloadCell);
 			tableBody.appendChild(row);
 		}
@@ -2733,6 +3362,27 @@ function renderRecordings(groups)
 
 		recordingsList.appendChild(table);
 	}
+
+	var previousWeekWrap = document.createElement('div');
+	previousWeekWrap.className = 'recordings-pagination';
+
+	var previousWeekButton = document.createElement('button');
+	previousWeekButton.type = 'button';
+	previousWeekButton.className = 'previous-week-button';
+	previousWeekButton.textContent = 'Previous week';
+
+	var previousWeekRange = buildPreviousWeekRange();
+	var normalizedFilter = getRecordingNameFilterValue();
+	if (!previousWeekRange || !hasRecordingsForFilterRange(normalizedFilter, previousWeekRange)) {
+		previousWeekButton.disabled = true;
+		previousWeekButton.title = 'No older recordings match the current filters.';
+	} else {
+		previousWeekButton.onclick = goToPreviousWeek;
+		previousWeekButton.title = 'Shift the current date filters back one week.';
+	}
+
+	previousWeekWrap.appendChild(previousWeekButton);
+	recordingsList.appendChild(previousWeekWrap);
 }
 
 function exportFilteredZip()
@@ -2852,6 +3502,7 @@ function startRecordingsPage()
 	initTheme();
 	initFiltersVisibility();
 	initializeCustomPlayerControls();
+	initializeSelectedRecordingActionButtons();
 	initPlaybackOptionPreferences();
 	var filterInput = document.getElementById('recordingsFilterInput');
 	if (filterInput) {
@@ -2861,8 +3512,7 @@ function startRecordingsPage()
 	var dateStartInput = document.getElementById('recordingsFilterStart');
 	if (dateStartInput) {
 		var oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-		var pad = function (n) { return String(n).padStart(2, '0'); };
-		dateStartInput.value = oneWeekAgo.getFullYear() + '-' + pad(oneWeekAgo.getMonth() + 1) + '-' + pad(oneWeekAgo.getDate()) + 'T' + pad(oneWeekAgo.getHours()) + ':' + pad(oneWeekAgo.getMinutes());
+		dateStartInput.value = formatDateTimeLocalValue(oneWeekAgo);
 		dateStartInput.addEventListener('change', onFilterInputChanged);
 	}
 
