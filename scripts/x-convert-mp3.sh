@@ -12,6 +12,12 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+which lame > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo "Error: lame is not installed. Please install it with 'sudo apt install -y lame'"
+    exit 1
+fi
+
 wavFile="$1"
 if [ -z "$wavFile" ]; then
     echo "Usage: $0 <path_to_wav_file>"

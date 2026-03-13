@@ -12,6 +12,12 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+which oggenc > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo "Error: oggenc is not installed. Please install it with 'sudo apt install -y vorbis-tools'"
+    exit 1
+fi
+
 wavFile="$1"
 if [ -z "$wavFile" ]; then
     echo "Usage: $0 <path_to_wav_file>"
