@@ -13,7 +13,26 @@ function sendJsonResponse(array $payload, int $statusCode = 200): void
 	http_response_code($statusCode);
 	header('Content-Type: application/json; charset=utf-8');
 	header('Cache-Control: no-cache, no-store, must-revalidate');
-	echo json_encode($payload);
+	$jsonOptions = 0;
+	if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
+		$jsonOptions |= JSON_INVALID_UTF8_SUBSTITUTE;
+	}
+
+	$encodedPayload = json_encode($payload, $jsonOptions);
+	if ($encodedPayload === false) {
+		http_response_code(500);
+		$fallbackPayload = array(
+			'ok' => false,
+			'error' => 'Failed to encode JSON response: ' . json_last_error_msg(),
+		);
+
+		$encodedPayload = json_encode($fallbackPayload);
+		if ($encodedPayload === false) {
+			$encodedPayload = '{"ok":false,"error":"Failed to encode JSON response."}';
+		}
+	}
+
+	echo $encodedPayload;
 	exit;
 }
 
@@ -145,10 +164,336 @@ function decodeSynchsafeInt(string $bytes): int
 		| (ord($bytes[3]) & 0x7F);
 }
 
+function decodeId3FrameSize(string $bytes, int $id3VersionMajor): int
+{
+	if (strlen($bytes) !== 4) {
+		return 0;
+	}
+
+	if ($id3VersionMajor === 4) {
+		return decodeSynchsafeInt($bytes);
+	}
+
+	$sizeData = unpack('Nsize', $bytes);
+	return isset($sizeData['size']) ? (int)$sizeData['size'] : 0;
+}
+
+function normalizeMetadataTextValue(string $value): string
+{
+	$value = str_replace("\x00", ' ', $value);
+	$value = preg_replace('/\s+/', ' ', $value);
+	return trim((string)$value);
+}
+
+function decodeId3EncodedText(string $bytes, int $encodingByte): string
+{
+	if ($bytes === '') {
+		return '';
+	}
+
+	$decodedText = '';
+	if ($encodingByte === 1 || $encodingByte === 2) {
+		$sourceEncoding = ($encodingByte === 1) ? 'UTF-16' : 'UTF-16BE';
+		if (function_exists('mb_convert_encoding')) {
+			$converted = @mb_convert_encoding($bytes, 'UTF-8', $sourceEncoding);
+			if (is_string($converted)) {
+				$decodedText = $converted;
+			}
+		}
+
+		if ($decodedText === '' && function_exists('iconv')) {
+			$converted = @iconv($sourceEncoding, 'UTF-8//IGNORE', $bytes);
+			if (is_string($converted)) {
+				$decodedText = $converted;
+			}
+		}
+	} elseif ($encodingByte === 0) {
+		if (function_exists('mb_convert_encoding')) {
+			$converted = @mb_convert_encoding($bytes, 'UTF-8', 'ISO-8859-1');
+			if (is_string($converted)) {
+				$decodedText = $converted;
+			}
+		} elseif (function_exists('iconv')) {
+			$converted = @iconv('ISO-8859-1', 'UTF-8//IGNORE', $bytes);
+			if (is_string($converted)) {
+				$decodedText = $converted;
+			}
+		}
+	}
+
+	if ($decodedText === '') {
+		$decodedText = $bytes;
+	}
+
+	return normalizeMetadataTextValue($decodedText);
+}
+
+function decodeId3TextFramePayload(string $payload): string
+{
+	if ($payload === '') {
+		return '';
+	}
+
+	$encodingByte = ord($payload[0]);
+	return decodeId3EncodedText(substr($payload, 1), $encodingByte);
+}
+
+function decodeId3CommentFramePayload(string $payload): string
+{
+	if (strlen($payload) < 4) {
+		return '';
+	}
+
+	$encodingByte = ord($payload[0]);
+	$commentBytes = substr($payload, 4);
+	if ($commentBytes === '') {
+		return '';
+	}
+
+	if ($encodingByte === 1 || $encodingByte === 2) {
+		$separatorPosition = strpos($commentBytes, "\x00\x00");
+		if ($separatorPosition !== false) {
+			$commentBytes = substr($commentBytes, $separatorPosition + 2);
+		}
+	} else {
+		$separatorPosition = strpos($commentBytes, "\x00");
+		if ($separatorPosition !== false) {
+			$commentBytes = substr($commentBytes, $separatorPosition + 1);
+		}
+	}
+
+	return decodeId3EncodedText($commentBytes, $encodingByte);
+}
+
+function extractMp3TagTextMetadata(string $fullPath, int $fileSize): array
+{
+	$metadata = array(
+		'comment' => null,
+		'title' => null,
+	);
+
+	if ($fileSize <= 10) {
+		return $metadata;
+	}
+
+	$handle = fopen($fullPath, 'rb');
+	if ($handle === false) {
+		return $metadata;
+	}
+
+	$id3Header = fread($handle, 10);
+	if ($id3Header === false || strlen($id3Header) < 10 || substr($id3Header, 0, 3) !== 'ID3') {
+		fclose($handle);
+		return $metadata;
+	}
+
+	$id3VersionMajor = ord($id3Header[3]);
+	if ($id3VersionMajor < 3 || $id3VersionMajor > 4) {
+		fclose($handle);
+		return $metadata;
+	}
+
+	$id3TagSize = decodeSynchsafeInt(substr($id3Header, 6, 4));
+	if ($id3TagSize <= 0) {
+		fclose($handle);
+		return $metadata;
+	}
+
+	$id3TagData = fread($handle, min($id3TagSize, 262144));
+	fclose($handle);
+
+	if ($id3TagData === false || strlen($id3TagData) < 10) {
+		return $metadata;
+	}
+
+	$offset = 0;
+	$tagLength = strlen($id3TagData);
+	while (($offset + 10) <= $tagLength) {
+		$frameId = substr($id3TagData, $offset, 4);
+		if ($frameId === "\x00\x00\x00\x00") {
+			break;
+		}
+
+		if (!preg_match('/^[A-Z0-9]{4}$/', $frameId)) {
+			break;
+		}
+
+		$frameSize = decodeId3FrameSize(substr($id3TagData, $offset + 4, 4), $id3VersionMajor);
+		$frameDataOffset = $offset + 10;
+		if ($frameSize <= 0 || ($frameDataOffset + $frameSize) > $tagLength) {
+			break;
+		}
+
+		$framePayload = substr($id3TagData, $frameDataOffset, $frameSize);
+		if ($frameId === 'COMM' && $metadata['comment'] === null) {
+			$decodedComment = decodeId3CommentFramePayload($framePayload);
+			if ($decodedComment !== '') {
+				$metadata['comment'] = $decodedComment;
+			}
+		} elseif ($frameId === 'TIT2' && $metadata['title'] === null) {
+			$decodedTitle = decodeId3TextFramePayload($framePayload);
+			if ($decodedTitle !== '') {
+				$metadata['title'] = $decodedTitle;
+			}
+		}
+
+		if ($metadata['comment'] !== null && $metadata['title'] !== null) {
+			break;
+		}
+
+		$offset = $frameDataOffset + $frameSize;
+	}
+
+	return $metadata;
+}
+
+function unpackUnsignedInt32LE(string $data, int $offset): ?int
+{
+	if (($offset + 4) > strlen($data)) {
+		return null;
+	}
+
+	$unpacked = unpack('Vvalue', substr($data, $offset, 4));
+	if (!isset($unpacked['value'])) {
+		return null;
+	}
+
+	return (int)$unpacked['value'];
+}
+
+function parseVorbisCommentPacketFields(string $packet): array
+{
+	$metadata = array(
+		'comment' => null,
+		'title' => null,
+	);
+
+	$packetLength = strlen($packet);
+	if ($packetLength < 8) {
+		return $metadata;
+	}
+
+	$offset = 0;
+	$vendorLength = unpackUnsignedInt32LE($packet, $offset);
+	if ($vendorLength === null || $vendorLength < 0) {
+		return $metadata;
+	}
+
+	$offset += 4 + $vendorLength;
+	if ($offset > $packetLength) {
+		return $metadata;
+	}
+
+	$commentCount = unpackUnsignedInt32LE($packet, $offset);
+	if ($commentCount === null || $commentCount < 0) {
+		return $metadata;
+	}
+
+	$offset += 4;
+	$maxCommentCount = min($commentCount, 512);
+	for ($commentIndex = 0; $commentIndex < $maxCommentCount; $commentIndex++) {
+		$entryLength = unpackUnsignedInt32LE($packet, $offset);
+		if ($entryLength === null || $entryLength < 0) {
+			break;
+		}
+
+		$offset += 4;
+		if (($offset + $entryLength) > $packetLength) {
+			break;
+		}
+
+		$entry = substr($packet, $offset, $entryLength);
+		$offset += $entryLength;
+
+		$separatorPosition = strpos($entry, '=');
+		if ($separatorPosition === false) {
+			continue;
+		}
+
+		$key = strtoupper((string)substr($entry, 0, $separatorPosition));
+		$value = normalizeMetadataTextValue((string)substr($entry, $separatorPosition + 1));
+		if ($value === '') {
+			continue;
+		}
+
+		if ($key === 'COMMENT' && $metadata['comment'] === null) {
+			$metadata['comment'] = $value;
+		} elseif ($key === 'TITLE' && $metadata['title'] === null) {
+			$metadata['title'] = $value;
+		}
+
+		if ($metadata['comment'] !== null && $metadata['title'] !== null) {
+			break;
+		}
+	}
+
+	return $metadata;
+}
+
+function extractOggTagTextMetadata(string $fullPath, int $fileSize): array
+{
+	$metadata = array(
+		'comment' => null,
+		'title' => null,
+	);
+
+	if ($fileSize <= 0) {
+		return $metadata;
+	}
+
+	$handle = fopen($fullPath, 'rb');
+	if ($handle === false) {
+		return $metadata;
+	}
+
+	$bytesToRead = min($fileSize, 262144);
+	$data = ($bytesToRead > 0) ? fread($handle, $bytesToRead) : '';
+	fclose($handle);
+
+	if ($data === false || $data === '') {
+		return $metadata;
+	}
+
+	$opusTagPosition = strpos($data, 'OpusTags');
+	if ($opusTagPosition !== false) {
+		$parsed = parseVorbisCommentPacketFields(substr($data, $opusTagPosition + 8));
+		if ($parsed['comment'] !== null || $parsed['title'] !== null) {
+			return $parsed;
+		}
+	}
+
+	$vorbisCommentPosition = strpos($data, "\x03vorbis");
+	if ($vorbisCommentPosition !== false) {
+		$parsed = parseVorbisCommentPacketFields(substr($data, $vorbisCommentPosition + 7));
+		if ($parsed['comment'] !== null || $parsed['title'] !== null) {
+			return $parsed;
+		}
+	}
+
+	$fallbackCommentMatch = array();
+	if (preg_match('/COMMENT=([^\x00\r\n]+)/i', $data, $fallbackCommentMatch)) {
+		$fallbackComment = normalizeMetadataTextValue((string)$fallbackCommentMatch[1]);
+		if ($fallbackComment !== '') {
+			$metadata['comment'] = $fallbackComment;
+		}
+	}
+
+	$fallbackTitleMatch = array();
+	if (preg_match('/TITLE=([^\x00\r\n]+)/i', $data, $fallbackTitleMatch)) {
+		$fallbackTitle = normalizeMetadataTextValue((string)$fallbackTitleMatch[1]);
+		if ($fallbackTitle !== '') {
+			$metadata['title'] = $fallbackTitle;
+		}
+	}
+
+	return $metadata;
+}
+
 function emptySourceMetadata(): array
 {
 	return array(
 		'comment' => null,
+		'title' => null,
 		'url' => null,
 	);
 }
@@ -171,6 +516,31 @@ function extractSourceMetadataFromText(string $text): array
 
 	return array(
 		'comment' => 'Source URL: ' . $detectedUrl,
+		'title' => null,
+		'url' => $detectedUrl,
+	);
+}
+
+function extractSourceMetadataFromMetadataText(string $text): array
+{
+	$sourceMetadata = extractSourceMetadataFromText($text);
+	if ($sourceMetadata['url'] !== null) {
+		return $sourceMetadata;
+	}
+
+	if (!preg_match('/(https?:\/\/[^\s"\'<>\x00]+)/i', $text, $matches)) {
+		return emptySourceMetadata();
+	}
+
+	$detectedUrl = trim((string)$matches[1]);
+	$detectedUrl = rtrim($detectedUrl, ".,;)]}\x00");
+	if ($detectedUrl === '' || filter_var($detectedUrl, FILTER_VALIDATE_URL) === false) {
+		return emptySourceMetadata();
+	}
+
+	return array(
+		'comment' => 'Source URL: ' . $detectedUrl,
+		'title' => null,
 		'url' => $detectedUrl,
 	);
 }
@@ -197,16 +567,58 @@ function extractSourceMetadataFromChunk(string $chunk): array
 	return emptySourceMetadata();
 }
 
-function detectSourceMetadataForRecording(string $fullPath, int $fileSize): array
+function detectSourceMetadataForRecording(string $fullPath, int $fileSize, string $extension): array
 {
-	$emptyMetadata = emptySourceMetadata();
+	$metadata = emptySourceMetadata();
 	if ($fileSize <= 0) {
-		return $emptyMetadata;
+		return $metadata;
+	}
+
+	$normalizedExtension = strtolower($extension);
+	$tagMetadata = array('comment' => null, 'title' => null);
+	if ($normalizedExtension === 'mp3') {
+		$tagMetadata = extractMp3TagTextMetadata($fullPath, $fileSize);
+	} elseif ($normalizedExtension === 'ogg') {
+		$tagMetadata = extractOggTagTextMetadata($fullPath, $fileSize);
+	}
+
+	if (isset($tagMetadata['comment']) && is_string($tagMetadata['comment'])) {
+		$normalizedComment = normalizeMetadataTextValue($tagMetadata['comment']);
+		if ($normalizedComment !== '') {
+			$metadata['comment'] = $normalizedComment;
+		}
+	}
+
+	if (isset($tagMetadata['title']) && is_string($tagMetadata['title'])) {
+		$normalizedTitle = normalizeMetadataTextValue($tagMetadata['title']);
+		if ($normalizedTitle !== '') {
+			$metadata['title'] = $normalizedTitle;
+		}
+	}
+
+	foreach (array('comment', 'title') as $metadataFieldName) {
+		if (!isset($metadata[$metadataFieldName]) || !is_string($metadata[$metadataFieldName])) {
+			continue;
+		}
+
+		$fieldValue = trim($metadata[$metadataFieldName]);
+		if ($fieldValue === '') {
+			continue;
+		}
+
+		$fieldSourceMetadata = extractSourceMetadataFromMetadataText($fieldValue);
+		if ($fieldSourceMetadata['url'] !== null) {
+			$metadata['url'] = $fieldSourceMetadata['url'];
+			if ($metadata['comment'] === null || trim((string)$metadata['comment']) === '') {
+				$metadata['comment'] = $fieldSourceMetadata['comment'];
+			}
+			return $metadata;
+		}
 	}
 
 	$handle = fopen($fullPath, 'rb');
 	if ($handle === false) {
-		return $emptyMetadata;
+		return $metadata;
 	}
 
 	$headBytesToRead = min($fileSize, 131072);
@@ -215,8 +627,12 @@ function detectSourceMetadataForRecording(string $fullPath, int $fileSize): arra
 		if ($headChunk !== false) {
 			$headMetadata = extractSourceMetadataFromChunk((string)$headChunk);
 			if ($headMetadata['url'] !== null) {
+				if ($metadata['comment'] === null) {
+					$metadata['comment'] = $headMetadata['comment'];
+				}
+				$metadata['url'] = $headMetadata['url'];
 				fclose($handle);
-				return $headMetadata;
+				return $metadata;
 			}
 		}
 	}
@@ -229,15 +645,19 @@ function detectSourceMetadataForRecording(string $fullPath, int $fileSize): arra
 		if ($tailChunk !== false) {
 			$tailMetadata = extractSourceMetadataFromChunk((string)$tailChunk);
 			if ($tailMetadata['url'] !== null) {
+				if ($metadata['comment'] === null) {
+					$metadata['comment'] = $tailMetadata['comment'];
+				}
+				$metadata['url'] = $tailMetadata['url'];
 				fclose($handle);
-				return $tailMetadata;
+				return $metadata;
 			}
 		}
 	}
 
 	fclose($handle);
 
-	return $emptyMetadata;
+	return $metadata;
 }
 
 function estimateMp3DurationSeconds(string $fullPath, int $fileSize): ?float
@@ -620,7 +1040,7 @@ function listRecordings(string $rootDirectory, array $allowedExtensions): array
 		$parsedTimestamp = parseRecordingTimestamp($relativePath, $modifiedAt);
 		$sizeBytes = (int)$fileInfo->getSize();
 		$durationSeconds = estimateRecordingDurationSeconds($fullPath, $sizeBytes, $extension);
-		$sourceMetadata = detectSourceMetadataForRecording($fullPath, $sizeBytes);
+		$sourceMetadata = detectSourceMetadataForRecording($fullPath, $sizeBytes, $extension);
 
 		$items[] = array(
 			'path' => $relativePath,
@@ -637,6 +1057,7 @@ function listRecordings(string $rootDirectory, array $allowedExtensions): array
 			'duration_seconds' => $durationSeconds,
 			'duration_display' => formatDuration($durationSeconds),
 			'metadata_comment' => $sourceMetadata['comment'],
+			'metadata_title' => $sourceMetadata['title'],
 			'source_url' => $sourceMetadata['url'],
 		);
 	}
@@ -920,7 +1341,7 @@ function streamLiveSourceForRecording(string $rootDirectory, array $allowedExten
 	$fullPath = (string)$resolvedRecording['full_path'];
 	$fallbackExtension = (string)$resolvedRecording['extension'];
 	$fileSize = filesize($fullPath);
-	$sourceMetadata = detectSourceMetadataForRecording($fullPath, $fileSize !== false ? (int)$fileSize : 0);
+	$sourceMetadata = detectSourceMetadataForRecording($fullPath, $fileSize !== false ? (int)$fileSize : 0, $fallbackExtension);
 	$liveSourceUrl = isset($sourceMetadata['url']) ? trim((string)$sourceMetadata['url']) : '';
 	if ($liveSourceUrl === '' || filter_var($liveSourceUrl, FILTER_VALIDATE_URL) === false) {
 		http_response_code(404);
@@ -1081,6 +1502,32 @@ if ($ajaxAction === 'zip') {
 	zipRecordingsFiltered($recordingsRoot, $supportedRecordingExtensions, $nameFilter, $startTs, $endTs);
 }
 
+function recordingMatchesNameFilter(array $recording, string $nameFilter): bool
+{
+	if ($nameFilter === '') {
+		return true;
+	}
+
+	$candidateValues = array(
+		isset($recording['name_pretty']) ? strtolower((string)$recording['name_pretty']) : '',
+		isset($recording['name']) ? strtolower((string)$recording['name']) : '',
+		isset($recording['metadata_comment']) ? strtolower((string)$recording['metadata_comment']) : '',
+		isset($recording['metadata_title']) ? strtolower((string)$recording['metadata_title']) : '',
+	);
+
+	foreach ($candidateValues as $candidateValue) {
+		if ($candidateValue === '') {
+			continue;
+		}
+
+		if (strpos($candidateValue, $nameFilter) !== false) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, string $nameFilter, int $startTs, int $endTs): void
 {
 	if (!class_exists('ZipArchive')) {
@@ -1109,12 +1556,8 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 	$matchingFiles = array();
 	foreach ($data['groups'] as $group) {
 		foreach ($group['items'] as $item) {
-			if ($nameFilter !== '') {
-				$prettyName = strtolower((string)$item['name_pretty']);
-				$rawName = strtolower((string)$item['name']);
-				if (strpos($prettyName, $nameFilter) === false && strpos($rawName, $nameFilter) === false) {
-					continue;
-				}
+			if (!recordingMatchesNameFilter($item, $nameFilter)) {
+				continue;
 			}
 
 			$ts = (int)$item['timestamp'];
@@ -2152,8 +2595,8 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 				</div>
 				<div class="recordings-controls-body" id="recordingsControlsBody">
 					<div class="recordings-controls-row">
-						<label for="recordingsFilterInput" class="recordings-filter-label">Filter by name:</label>
-						<input type="text" id="recordingsFilterInput" class="recordings-filter-input" placeholder="Type to filter recordings..." autocomplete="off" />
+						<label for="recordingsFilterInput" class="recordings-filter-label">Filter:</label>
+						<input type="text" id="recordingsFilterInput" class="recordings-filter-input" placeholder="Type to filter name, comment, or title..." autocomplete="off" />
 						<div class="checkbox-stack">
 							<label class="autoplay-new-label" for="autoPlayNewCheckbox"><input type="checkbox" id="autoPlayNewCheckbox" /> Auto play new recordings</label>
 							<label class="autoplay-new-label" for="keepPlayingChronologicallyCheckbox"><input type="checkbox" id="keepPlayingChronologicallyCheckbox" /> Keep playing chronologically</label>
@@ -3136,8 +3579,13 @@ function recordingMatchesFilter(recording, normalizedFilter)
 
 	var prettyName = String(recording.name_pretty || '').toLowerCase();
 	var rawName = String(recording.name || '').toLowerCase();
+	var metadataComment = String(recording.metadata_comment || '').toLowerCase();
+	var metadataTitle = String(recording.metadata_title || '').toLowerCase();
 
-	return prettyName.indexOf(normalizedFilter) !== -1 || rawName.indexOf(normalizedFilter) !== -1;
+	return prettyName.indexOf(normalizedFilter) !== -1
+		|| rawName.indexOf(normalizedFilter) !== -1
+		|| metadataComment.indexOf(normalizedFilter) !== -1
+		|| metadataTitle.indexOf(normalizedFilter) !== -1;
 }
 
 function filterRecordingGroups(groups, normalizedFilter, dateRange)
