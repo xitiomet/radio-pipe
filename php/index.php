@@ -675,41 +675,148 @@ function listRecordings(string $rootDirectory, array $allowedExtensions): array
 	);
 }
 
-function streamRecording(string $rootDirectory, array $allowedExtensions, string $requestedPath, bool $forceDownload = false): void
+function sendAudioStreamAccessHeaders(): void
+{
+	header('Access-Control-Allow-Origin: *');
+	header('Access-Control-Allow-Methods: GET, HEAD, OPTIONS');
+	header('Access-Control-Allow-Headers: Range, Origin, Accept, Access-Control-Request-Private-Network');
+	header('Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges, Content-Type');
+
+	if (
+		isset($_SERVER['HTTP_ACCESS_CONTROL_REQUEST_PRIVATE_NETWORK'])
+		&& strtolower((string)$_SERVER['HTTP_ACCESS_CONTROL_REQUEST_PRIVATE_NETWORK']) === 'true'
+	) {
+		header('Access-Control-Allow-Private-Network: true');
+	}
+}
+
+function resolveRequestedRecordingFile(string $rootDirectory, array $allowedExtensions, string $requestedPath): array
 {
 	$realRoot = realpath($rootDirectory);
 	if ($realRoot === false || !is_dir($realRoot)) {
-		http_response_code(500);
-		echo 'Recordings directory is not available.';
-		exit;
+		return array(
+			'ok' => false,
+			'status_code' => 500,
+			'message' => 'Recordings directory is not available.',
+		);
 	}
 
 	$normalizedPath = normalizeRelativePath($requestedPath);
 	if ($normalizedPath === '') {
-		http_response_code(400);
-		echo 'Invalid file path.';
-		exit;
+		return array(
+			'ok' => false,
+			'status_code' => 400,
+			'message' => 'Invalid file path.',
+		);
 	}
 
 	$fullPath = realpath($realRoot . DIRECTORY_SEPARATOR . $normalizedPath);
 	if ($fullPath === false || !is_file($fullPath)) {
-		http_response_code(404);
-		echo 'Recording not found.';
-		exit;
+		return array(
+			'ok' => false,
+			'status_code' => 404,
+			'message' => 'Recording not found.',
+		);
 	}
 
 	if (strpos($fullPath, $realRoot . DIRECTORY_SEPARATOR) !== 0) {
-		http_response_code(403);
-		echo 'Access denied.';
-		exit;
+		return array(
+			'ok' => false,
+			'status_code' => 403,
+			'message' => 'Access denied.',
+		);
 	}
 
 	$extension = strtolower((string)pathinfo($fullPath, PATHINFO_EXTENSION));
 	if (!in_array($extension, $allowedExtensions, true)) {
-		http_response_code(400);
-		echo 'Unsupported recording file type.';
+		return array(
+			'ok' => false,
+			'status_code' => 400,
+			'message' => 'Unsupported recording file type.',
+		);
+	}
+
+	return array(
+		'ok' => true,
+		'root' => $realRoot,
+		'normalized_path' => $normalizedPath,
+		'full_path' => $fullPath,
+		'extension' => $extension,
+	);
+}
+
+function sanitizeHeaderValue(string $value): string
+{
+	return str_replace(array("\r", "\n"), '', trim($value));
+}
+
+function parseHttpWrapperResponseMetadata(array $wrapperData): array
+{
+	$statusCode = 200;
+	$headers = array();
+
+	foreach ($wrapperData as $line) {
+		if (!is_string($line)) {
+			continue;
+		}
+
+		$trimmedLine = trim($line);
+		if ($trimmedLine === '') {
+			continue;
+		}
+
+		if (preg_match('#^HTTP/\S+\s+(\d{3})#i', $trimmedLine, $matches)) {
+			$statusCode = (int)$matches[1];
+			$headers = array();
+			continue;
+		}
+
+		$separatorPosition = strpos($trimmedLine, ':');
+		if ($separatorPosition === false) {
+			continue;
+		}
+
+		$headerName = strtolower(trim(substr($trimmedLine, 0, $separatorPosition)));
+		$headerValue = sanitizeHeaderValue(substr($trimmedLine, $separatorPosition + 1));
+		if ($headerName === '' || $headerValue === '') {
+			continue;
+		}
+
+		$headers[$headerName] = $headerValue;
+	}
+
+	return array(
+		'status_code' => $statusCode,
+		'headers' => $headers,
+	);
+}
+
+function guessLiveStreamMimeType(string $sourceUrl, string $fallbackExtension): string
+{
+	$sourcePath = parse_url($sourceUrl, PHP_URL_PATH);
+	$sourceExtension = is_string($sourcePath) ? strtolower((string)pathinfo($sourcePath, PATHINFO_EXTENSION)) : '';
+	if (in_array($sourceExtension, array('mp3', 'ogg', 'wav'), true)) {
+		return getRecordingMimeType($sourceExtension);
+	}
+
+	if (in_array($fallbackExtension, array('mp3', 'ogg', 'wav'), true)) {
+		return getRecordingMimeType($fallbackExtension);
+	}
+
+	return 'audio/mpeg';
+}
+
+function streamRecording(string $rootDirectory, array $allowedExtensions, string $requestedPath, bool $forceDownload = false): void
+{
+	$resolvedRecording = resolveRequestedRecordingFile($rootDirectory, $allowedExtensions, $requestedPath);
+	if ($resolvedRecording['ok'] !== true) {
+		http_response_code((int)$resolvedRecording['status_code']);
+		echo (string)$resolvedRecording['message'];
 		exit;
 	}
+
+	$fullPath = (string)$resolvedRecording['full_path'];
+	$extension = (string)$resolvedRecording['extension'];
 
 	$fileSize = filesize($fullPath);
 	if ($fileSize === false) {
@@ -752,6 +859,7 @@ function streamRecording(string $rootDirectory, array $allowedExtensions, string
 
 	$contentLength = ($rangeEnd - $rangeStart) + 1;
 
+	sendAudioStreamAccessHeaders();
 	header('Content-Type: ' . getRecordingMimeType($extension));
 	header('Accept-Ranges: bytes');
 	header('Cache-Control: no-cache, no-store, must-revalidate');
@@ -800,7 +908,152 @@ function streamRecording(string $rootDirectory, array $allowedExtensions, string
 	exit;
 }
 
+function streamLiveSourceForRecording(string $rootDirectory, array $allowedExtensions, string $requestedPath): void
+{
+	$resolvedRecording = resolveRequestedRecordingFile($rootDirectory, $allowedExtensions, $requestedPath);
+	if ($resolvedRecording['ok'] !== true) {
+		http_response_code((int)$resolvedRecording['status_code']);
+		echo (string)$resolvedRecording['message'];
+		exit;
+	}
+
+	$fullPath = (string)$resolvedRecording['full_path'];
+	$fallbackExtension = (string)$resolvedRecording['extension'];
+	$fileSize = filesize($fullPath);
+	$sourceMetadata = detectSourceMetadataForRecording($fullPath, $fileSize !== false ? (int)$fileSize : 0);
+	$liveSourceUrl = isset($sourceMetadata['url']) ? trim((string)$sourceMetadata['url']) : '';
+	if ($liveSourceUrl === '' || filter_var($liveSourceUrl, FILTER_VALIDATE_URL) === false) {
+		http_response_code(404);
+		echo 'Live source URL is not available for this recording.';
+		exit;
+	}
+
+	if (!filter_var($liveSourceUrl, FILTER_VALIDATE_URL, FILTER_FLAG_PATH_REQUIRED)) {
+		$pathValue = parse_url($liveSourceUrl, PHP_URL_PATH);
+		if (!is_string($pathValue) || $pathValue === '') {
+			http_response_code(400);
+			echo 'Live source URL path is invalid.';
+			exit;
+		}
+	}
+
+	$requestHeaders = array(
+		'Accept: audio/*,*/*;q=0.9',
+		'Connection: close',
+	);
+	if (isset($_SERVER['HTTP_USER_AGENT']) && trim((string)$_SERVER['HTTP_USER_AGENT']) !== '') {
+		$requestHeaders[] = 'User-Agent: ' . sanitizeHeaderValue((string)$_SERVER['HTTP_USER_AGENT']);
+	}
+
+	$context = stream_context_create(array(
+		'http' => array(
+			'method' => 'GET',
+			'header' => implode("\r\n", $requestHeaders) . "\r\n",
+			'timeout' => 15,
+			'follow_location' => 1,
+			'max_redirects' => 5,
+			'ignore_errors' => true,
+			'protocol_version' => 1.1,
+		),
+	));
+
+	$remoteHandle = @fopen($liveSourceUrl, 'rb', false, $context);
+	if ($remoteHandle === false) {
+		http_response_code(502);
+		echo 'Unable to connect to the live source stream.';
+		exit;
+	}
+
+	$streamMetadata = stream_get_meta_data($remoteHandle);
+	$responseMetadata = parseHttpWrapperResponseMetadata(
+		isset($streamMetadata['wrapper_data']) && is_array($streamMetadata['wrapper_data'])
+			? $streamMetadata['wrapper_data']
+			: array()
+	);
+	$statusCode = isset($responseMetadata['status_code']) ? (int)$responseMetadata['status_code'] : 200;
+	if ($statusCode >= 400) {
+		fclose($remoteHandle);
+		http_response_code(502);
+		echo 'Live source returned HTTP ' . $statusCode . '.';
+		exit;
+	}
+
+	$remoteHeaders = isset($responseMetadata['headers']) && is_array($responseMetadata['headers'])
+		? $responseMetadata['headers']
+		: array();
+	$remoteContentType = isset($remoteHeaders['content-type']) ? sanitizeHeaderValue((string)$remoteHeaders['content-type']) : '';
+	$contentType = $remoteContentType;
+	if (
+		$contentType === ''
+		|| (
+			stripos($contentType, 'audio/') !== 0
+			&& stripos($contentType, 'application/ogg') !== 0
+			&& stripos($contentType, 'application/octet-stream') !== 0
+		)
+	) {
+		$contentType = guessLiveStreamMimeType($liveSourceUrl, $fallbackExtension);
+	}
+
+	$downloadName = basename((string)parse_url($liveSourceUrl, PHP_URL_PATH));
+	if ($downloadName === '' || $downloadName === '/' || $downloadName === '.') {
+		$downloadName = basename($fullPath);
+	}
+
+	sendAudioStreamAccessHeaders();
+	header('Content-Type: ' . $contentType);
+	header('Cache-Control: no-cache, no-store, must-revalidate');
+	header('Content-Disposition: inline; filename="' . $downloadName . '"');
+	if (isset($remoteHeaders['content-length']) && ctype_digit((string)$remoteHeaders['content-length'])) {
+		header('Content-Length: ' . (string)$remoteHeaders['content-length']);
+	}
+
+	http_response_code(200);
+	set_time_limit(0);
+	stream_set_timeout($remoteHandle, 15);
+
+	while (!feof($remoteHandle)) {
+		$buffer = fread($remoteHandle, 8192);
+		if ($buffer === false) {
+			break;
+		}
+
+		if ($buffer === '') {
+			$chunkMetadata = stream_get_meta_data($remoteHandle);
+			if (isset($chunkMetadata['timed_out']) && $chunkMetadata['timed_out'] === true) {
+				break;
+			}
+
+			if (connection_aborted()) {
+				break;
+			}
+
+			usleep(10000);
+			continue;
+		}
+
+		echo $buffer;
+		flush();
+
+		if (connection_aborted()) {
+			break;
+		}
+	}
+
+	fclose($remoteHandle);
+	exit;
+}
+
 $ajaxAction = isset($_GET['ajax']) ? (string)$_GET['ajax'] : '';
+if (
+	($ajaxAction === 'stream' || $ajaxAction === 'live_proxy')
+	&& isset($_SERVER['REQUEST_METHOD'])
+	&& strtoupper((string)$_SERVER['REQUEST_METHOD']) === 'OPTIONS'
+) {
+	sendAudioStreamAccessHeaders();
+	http_response_code(204);
+	exit;
+}
+
 if ($ajaxAction === 'list') {
 	$payload = listRecordings($recordingsRoot, $supportedRecordingExtensions);
 	if ($payload['ok'] !== true) {
@@ -814,6 +1067,11 @@ if ($ajaxAction === 'stream') {
 	$requestedFile = isset($_GET['file']) ? (string)$_GET['file'] : '';
 	$forceDownload = isset($_GET['download']) && (string)$_GET['download'] === '1';
 	streamRecording($recordingsRoot, $supportedRecordingExtensions, $requestedFile, $forceDownload);
+}
+
+if ($ajaxAction === 'live_proxy') {
+	$requestedFile = isset($_GET['file']) ? (string)$_GET['file'] : '';
+	streamLiveSourceForRecording($recordingsRoot, $supportedRecordingExtensions, $requestedFile);
 }
 
 if ($ajaxAction === 'zip') {
@@ -2332,6 +2590,25 @@ function getLiveSourceUrlFromRecording(recording)
 	return '';
 }
 
+function buildLiveProxyUrl(recording)
+{
+	if (!recording || typeof recording.path !== 'string') {
+		return '';
+	}
+
+	var normalizedPath = String(recording.path || '').trim();
+	if (normalizedPath === '') {
+		return '';
+	}
+
+	var proxyUrl = '?ajax=live_proxy&file=' + encodeURIComponent(normalizedPath);
+	if (typeof recording.mtime !== 'undefined' && recording.mtime !== null && String(recording.mtime).trim() !== '') {
+		proxyUrl += '&v=' + encodeURIComponent(String(recording.mtime));
+	}
+
+	return proxyUrl;
+}
+
 function getRecordingFileName(recording)
 {
 	if (!recording) {
@@ -2444,6 +2721,11 @@ function onListenLiveButtonClicked()
 		return;
 	}
 
+	var livePlaybackUrl = buildLiveProxyUrl(recording);
+	if (livePlaybackUrl === '') {
+		return;
+	}
+
 	var audioPlayer = document.getElementById('audioPlayer');
 	if (!audioPlayer) {
 		return;
@@ -2455,7 +2737,7 @@ function onListenLiveButtonClicked()
 		audioPlayer.setAttribute('data-path', recording.path);
 		audioPlayer.setAttribute('data-mode', 'live');
 		audioPlayer.setAttribute('data-live-url', liveSourceUrl);
-		audioPlayer.src = liveSourceUrl;
+		audioPlayer.src = livePlaybackUrl;
 		audioPlayer.load();
 	}
 
