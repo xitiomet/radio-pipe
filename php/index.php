@@ -1047,10 +1047,242 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 	}
 
 	#audioPlayer {
+		display: none;
+	}
+
+	.custom-audio-player {
+		margin-top: 10px;
+		margin-bottom: 10px;
+		padding: 10px;
+		border: 1px solid #3a3a3a;
+		border-radius: 8px;
+		background: linear-gradient(135deg, #20262e 0%, #171717 100%);
+		display: flex;
+		align-items: center;
+		gap: 14px;
+	}
+
+	body.theme-light .custom-audio-player {
+		border-color: #c4d2e1;
+		background: linear-gradient(135deg, #f4f8fd 0%, #e9f0f8 100%);
+	}
+
+	.custom-audio-player.is-empty {
+		opacity: 0.75;
+	}
+
+	.audio-controls-cluster {
+		flex: 0 0 auto;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.audio-icon-button {
+		width: 42px;
+		height: 42px;
+		padding: 0;
+		border: 1px solid #53779a;
+		border-radius: 999px;
+		background-color: #24374a;
+		color: #eaf4ff;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+	}
+
+	body.theme-light .audio-icon-button {
+		border-color: #6f8db3;
+		background-color: #3a6da4;
+		color: #ffffff;
+	}
+
+	.audio-icon-button:hover:enabled {
+		background-color: #2f4f70;
+		border-color: #7ba4d2;
+	}
+
+	body.theme-light .audio-icon-button:hover:enabled {
+		background-color: #427ab8;
+		border-color: #5e88b5;
+	}
+
+	.audio-icon-button:active:enabled {
+		transform: translateY(1px);
+	}
+
+	.audio-icon-button:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+
+	.audio-play-pause-button {
+		width: 52px;
+		height: 52px;
+		border-color: #4f76a1;
+		background-color: #1f3f61;
+	}
+
+	.audio-play-pause-button:hover:enabled {
+		background-color: #27517c;
+		border-color: #6f9dce;
+	}
+
+	body.theme-light .audio-play-pause-button {
+		border-color: #6c8ab0;
+		background-color: #2f5f92;
+	}
+
+	body.theme-light .audio-play-pause-button:hover:enabled {
+		background-color: #3b72ad;
+	}
+
+	.audio-play-pause-button.is-playing {
+		border-color: #4d8552;
+		background-color: #285a31;
+		color: #e9ffe9;
+	}
+
+	body.theme-light .audio-play-pause-button.is-playing {
+		border-color: #4f8c5b;
+		background-color: #2f6d3c;
+		color: #ffffff;
+	}
+
+	.audio-skip-button {
+		position: relative;
+	}
+
+	.audio-skip-button .audio-svg-icon {
+		width: 18px;
+		height: 18px;
+	}
+
+	.audio-skip-value {
+		position: absolute;
+		right: 4px;
+		bottom: 2px;
+		font-size: 9px;
+		font-weight: bold;
+		line-height: 1;
+		opacity: 0.9;
+	}
+
+	.audio-svg-icon {
+		width: 22px;
+		height: 22px;
+		display: block;
+		fill: currentColor;
+	}
+
+	.audio-play-pause-button .audio-icon-pause {
+		display: none;
+	}
+
+	.audio-play-pause-button.is-playing .audio-icon-play {
+		display: none;
+	}
+
+	.audio-play-pause-button.is-playing .audio-icon-pause {
+		display: block;
+	}
+
+	.audio-progress-wrap {
+		flex: 1 1 auto;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.audio-seekbar {
+		--seek-progress: 0%;
+		-webkit-appearance: none;
+		appearance: none;
 		width: 100%;
-        margin-top: 10px;
-        margin-bottom: 10px;
-        color: #f2f2f2;
+		height: 16px;
+		background: transparent;
+		cursor: pointer;
+	}
+
+	.audio-seekbar:disabled {
+		cursor: not-allowed;
+		opacity: 0.65;
+	}
+
+	.audio-seekbar::-webkit-slider-runnable-track {
+		height: 6px;
+		border-radius: 999px;
+		background: linear-gradient(to right, #79adff 0%, #79adff var(--seek-progress), #4b4b4b var(--seek-progress), #4b4b4b 100%);
+	}
+
+	body.theme-light .audio-seekbar::-webkit-slider-runnable-track {
+		background: linear-gradient(to right, #2f75d6 0%, #2f75d6 var(--seek-progress), #c7d4e2 var(--seek-progress), #c7d4e2 100%);
+	}
+
+	.audio-seekbar::-webkit-slider-thumb {
+		-webkit-appearance: none;
+		appearance: none;
+		width: 14px;
+		height: 14px;
+		margin-top: -4px;
+		border: 1px solid #c8ddff;
+		border-radius: 50%;
+		background-color: #f3f8ff;
+	}
+
+	body.theme-light .audio-seekbar::-webkit-slider-thumb {
+		border-color: #215fb6;
+		background-color: #ffffff;
+	}
+
+	.audio-seekbar::-moz-range-track {
+		height: 6px;
+		border: none;
+		border-radius: 999px;
+		background-color: #4b4b4b;
+	}
+
+	body.theme-light .audio-seekbar::-moz-range-track {
+		background-color: #c7d4e2;
+	}
+
+	.audio-seekbar::-moz-range-progress {
+		height: 6px;
+		border-radius: 999px;
+		background-color: #79adff;
+	}
+
+	body.theme-light .audio-seekbar::-moz-range-progress {
+		background-color: #2f75d6;
+	}
+
+	.audio-seekbar::-moz-range-thumb {
+		width: 14px;
+		height: 14px;
+		border: 1px solid #c8ddff;
+		border-radius: 50%;
+		background-color: #f3f8ff;
+	}
+
+	body.theme-light .audio-seekbar::-moz-range-thumb {
+		border-color: #215fb6;
+		background-color: #ffffff;
+	}
+
+	.audio-time-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		font-size: 12px;
+		color: #c8d4e0;
+		font-family: monospace;
+	}
+
+	body.theme-light .audio-time-row {
+		color: #34495e;
 	}
 
 	.status-row {
@@ -1063,8 +1295,8 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 
 	.recordings-controls {
 		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
+		flex-direction: column;
+		align-items: stretch;
 		gap: 10px;
 		padding: 8px;
 		border-bottom: 1px solid #343434;
@@ -1074,6 +1306,83 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 	body.theme-light .recordings-controls {
 		border-bottom-color: #d5dce5;
 		background-color: #f3f7fc;
+	}
+
+	.recordings-controls-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+		width: 100%;
+	}
+
+	.recordings-controls-header-actions {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-left: auto;
+	}
+
+	.recordings-controls-title {
+		font-size: 12px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: #aebccd;
+	}
+
+	body.theme-light .recordings-controls-title {
+		color: #3a5268;
+	}
+
+	.filter-toggle-button {
+		min-width: 120px;
+	}
+
+	.header-icon-button {
+		width: 34px;
+		min-width: 34px;
+		height: 34px;
+		min-height: 34px;
+		padding: 0;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		line-height: 1;
+	}
+
+	.header-action-icon {
+		width: 16px;
+		height: 16px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.theme-icon-button .theme-icon-sun,
+	.theme-icon-button .theme-icon-moon {
+		display: none;
+	}
+
+	body.theme-light .theme-icon-button .theme-icon-sun {
+		display: block;
+	}
+
+	body.theme-dark .theme-icon-button .theme-icon-moon {
+		display: block;
+	}
+
+	.recordings-controls-body {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		width: 100%;
+	}
+
+	.recordings-controls.is-collapsed .recordings-controls-body {
+		display: none;
 	}
 
 	.recordings-filter-label {
@@ -1114,6 +1423,8 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 
 	.status-text {
 		flex: 1 1 240px;
+		font-size: 12px;
+		line-height: 1.3;
 	}
 
 	.refresh-button {
@@ -1139,10 +1450,6 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 
 	body.theme-light .refresh-button:hover {
 		background-color: #edf3fb;
-	}
-
-	.theme-button {
-		min-width: 120px;
 	}
 
 	.export-zip-button {
@@ -1270,8 +1577,41 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 			padding: 8px;
 		}
 
+		.custom-audio-player {
+			flex-direction: column;
+			align-items: stretch;
+			gap: 8px;
+		}
+
+		.audio-controls-cluster {
+			justify-content: center;
+			width: 100%;
+		}
+
+		.audio-progress-wrap {
+			width: 100%;
+		}
+
 		.recordings-controls {
 			align-items: stretch;
+		}
+
+		.recordings-controls-header {
+			flex-wrap: wrap;
+		}
+
+		.recordings-controls-header-actions {
+			width: 100%;
+		}
+
+		.header-icon-button {
+			flex: 0 0 34px;
+		}
+
+		.filter-toggle-button {
+			width: auto;
+			flex: 1 1 auto;
+			margin-left: 0;
 		}
 
 		.recordings-filter-label,
@@ -1293,11 +1633,6 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 		.recording-table {
 			min-width: 500px;
 		}
-
-		.refresh-button,
-		.export-zip-button {
-			width: 32%;
-		}
 	}
 </style>
 
@@ -1305,41 +1640,95 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 <div class="status-row">
 	<span id="statusText" class="status-text">Loading recordings...</span>
 </div>
-<div style="text-align: center; margin-bottom: 10px;">
-	<button type="button" class="refresh-button" onclick="refreshRecordings(true)">Refresh Now</button>
-	<button type="button" class="refresh-button" onclick="document.documentElement.requestFullscreen();">Fullscreen</button>
-	<button type="button" id="themeToggleButton" class="refresh-button theme-button" onclick="toggleTheme()">Theme: Dark</button>
-</div>
 
 <div class="recordings-layout">
 	<div class="recordings-player-col">
 		<div class="recordings-panel" style="padding: 10px;">
 			<b id="selectedTitle">No recording selected</b><br />
 			<small id="selectedMeta">Select a recording to begin playback.</small>
-			<br />
-			<audio id="audioPlayer" controls preload="metadata"></audio>
-			<br />
+			<div class="custom-audio-player is-empty" id="customAudioPlayer">
+				<div class="audio-controls-cluster">
+					<button type="button" id="audioSkipBackButton" class="audio-icon-button audio-skip-button" aria-label="Skip back 10 seconds" title="Back 10s" disabled>
+						<svg class="audio-svg-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M13 8L3 16l10 8V8zm16 0L19 16l10 8V8z"></path></svg>
+						<span class="audio-skip-value" aria-hidden="true">10</span>
+					</button>
+					<button type="button" id="audioPlayPauseButton" class="audio-icon-button audio-play-pause-button" aria-label="Play" title="Play" disabled>
+						<svg class="audio-svg-icon audio-icon-play" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M11 7l14 9-14 9V7z"></path></svg>
+						<svg class="audio-svg-icon audio-icon-pause" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M10 7h5v18h-5zM18 7h5v18h-5z"></path></svg>
+					</button>
+					<button type="button" id="audioSkipForwardButton" class="audio-icon-button audio-skip-button" aria-label="Skip forward 10 seconds" title="Forward 10s" disabled>
+						<svg class="audio-svg-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M3 8l10 8-10 8V8zm16 0l10 8-10 8V8z"></path></svg>
+						<span class="audio-skip-value" aria-hidden="true">10</span>
+					</button>
+				</div>
+				<div class="audio-progress-wrap">
+					<input type="range" id="audioSeekBar" class="audio-seekbar" min="0" max="1000" value="0" step="1" aria-label="Seek playback position" disabled />
+					<div class="audio-time-row">
+						<span id="audioCurrentTime">0:00</span>
+						<span id="audioDuration">?:??</span>
+					</div>
+				</div>
+			</div>
+			<audio id="audioPlayer" preload="metadata"></audio>
 			<a id="downloadLink" href="#" style="display: none;">Download selected recording</a>
 		</div>
 	</div>
 
 	<div class="recordings-list-col">
 		<div class="recordings-panel">
-			<div class="recordings-controls">
-				<div class="recordings-controls-row">
-					<label for="recordingsFilterInput" class="recordings-filter-label">Filter by name:</label>
-					<input type="text" id="recordingsFilterInput" class="recordings-filter-input" placeholder="Type to filter recordings..." autocomplete="off" />
-					<div class="checkbox-stack">
-						<label class="autoplay-new-label" for="autoPlayNewCheckbox"><input type="checkbox" id="autoPlayNewCheckbox" /> Auto play new recordings</label>
-						<label class="autoplay-new-label" for="keepPlayingChronologicallyCheckbox"><input type="checkbox" id="keepPlayingChronologicallyCheckbox" /> Keep playing chronologically</label>
+			<div class="recordings-controls" id="recordingsControls">
+				<div class="recordings-controls-header">
+					<span class="recordings-controls-title">Filters and Controls</span>
+					<div class="recordings-controls-header-actions">
+						<button type="button" class="refresh-button header-icon-button" onclick="refreshRecordings(true)" aria-label="Refresh now" title="Refresh now">
+							<svg class="header-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<polyline points="23 4 23 10 17 10"></polyline>
+								<path d="M20.49 15a9 9 0 1 1 2.13-9"></path>
+							</svg>
+						</button>
+						<button type="button" class="refresh-button header-icon-button" onclick="document.documentElement.requestFullscreen();" aria-label="Fullscreen" title="Fullscreen">
+							<svg class="header-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<polyline points="8 3 3 3 3 8"></polyline>
+								<polyline points="16 3 21 3 21 8"></polyline>
+								<polyline points="3 16 3 21 8 21"></polyline>
+								<polyline points="21 16 21 21 16 21"></polyline>
+							</svg>
+						</button>
+						<button type="button" id="themeToggleButton" class="refresh-button header-icon-button theme-icon-button" onclick="toggleTheme()" aria-label="Switch to light mode" title="Switch to light mode">
+							<svg class="header-action-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<circle cx="12" cy="12" r="4"></circle>
+								<line x1="12" y1="2" x2="12" y2="5"></line>
+								<line x1="12" y1="19" x2="12" y2="22"></line>
+								<line x1="2" y1="12" x2="5" y2="12"></line>
+								<line x1="19" y1="12" x2="22" y2="12"></line>
+								<line x1="4.93" y1="4.93" x2="7.05" y2="7.05"></line>
+								<line x1="16.95" y1="16.95" x2="19.07" y2="19.07"></line>
+								<line x1="16.95" y1="7.05" x2="19.07" y2="4.93"></line>
+								<line x1="4.93" y1="19.07" x2="7.05" y2="16.95"></line>
+							</svg>
+							<svg class="header-action-icon theme-icon-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<path d="M21 12.79A9 9 0 1 1 11.21 3c.13 0 .25 0 .38.01A7 7 0 0 0 21 12.79z"></path>
+							</svg>
+						</button>
+						<button type="button" id="toggleFiltersButton" class="refresh-button filter-toggle-button" onclick="toggleFiltersVisibility()" aria-expanded="true">Hide Filters</button>
 					</div>
 				</div>
-				<div class="recordings-controls-row">
-					<label for="recordingsFilterStart" class="recordings-filter-range-label">From:</label>
-					<input type="datetime-local" id="recordingsFilterStart" class="recordings-filter-datetime" title="Filter recordings from this date/time (leave blank for no start limit)" />
-					<label for="recordingsFilterEnd" class="recordings-filter-range-label">To:</label>
-					<input type="datetime-local" id="recordingsFilterEnd" class="recordings-filter-datetime" title="Filter recordings up to this date/time (leave blank for no end limit)" />
-					<button type="button" id="exportZipButton" class="export-zip-button" onclick="exportFilteredZip()" title="Download all filtered recordings as a ZIP archive">Export ZIP (0)</button>
+				<div class="recordings-controls-body" id="recordingsControlsBody">
+					<div class="recordings-controls-row">
+						<label for="recordingsFilterInput" class="recordings-filter-label">Filter by name:</label>
+						<input type="text" id="recordingsFilterInput" class="recordings-filter-input" placeholder="Type to filter recordings..." autocomplete="off" />
+						<div class="checkbox-stack">
+							<label class="autoplay-new-label" for="autoPlayNewCheckbox"><input type="checkbox" id="autoPlayNewCheckbox" /> Auto play new recordings</label>
+							<label class="autoplay-new-label" for="keepPlayingChronologicallyCheckbox"><input type="checkbox" id="keepPlayingChronologicallyCheckbox" /> Keep playing chronologically</label>
+						</div>
+					</div>
+					<div class="recordings-controls-row">
+						<label for="recordingsFilterStart" class="recordings-filter-range-label">From:</label>
+						<input type="datetime-local" id="recordingsFilterStart" class="recordings-filter-datetime" title="Filter recordings from this date/time (leave blank for no start limit)" />
+						<label for="recordingsFilterEnd" class="recordings-filter-range-label">To:</label>
+						<input type="datetime-local" id="recordingsFilterEnd" class="recordings-filter-datetime" title="Filter recordings up to this date/time (leave blank for no end limit)" />
+						<button type="button" id="exportZipButton" class="export-zip-button" onclick="exportFilteredZip()" title="Download all filtered recordings as a ZIP archive">Export ZIP (0)</button>
+					</div>
 				</div>
 			</div>
 			<div class="recordings-list-wrap" id="recordingsList"></div>
@@ -1360,6 +1749,7 @@ var shownRecordingsSizeBytes = 0;
 var totalRecordingsSizeBytes = 0;
 var lastStatusMessage = '';
 var lastStatusIsError = false;
+var playerSkipAmountSeconds = 10;
 
 function applyTheme(themeName)
 {
@@ -1370,7 +1760,9 @@ function applyTheme(themeName)
 
 	var themeToggleButton = document.getElementById('themeToggleButton');
 	if (themeToggleButton) {
-		themeToggleButton.textContent = (theme === 'theme-light') ? 'Theme: Light' : 'Theme: Dark';
+		var nextThemeLabel = (theme === 'theme-light') ? 'Switch to dark mode' : 'Switch to light mode';
+		themeToggleButton.setAttribute('aria-label', nextThemeLabel);
+		themeToggleButton.setAttribute('title', nextThemeLabel);
 	}
 }
 
@@ -1393,6 +1785,49 @@ function initTheme()
 	}
 
 	applyTheme(savedTheme === 'theme-light' ? 'theme-light' : 'theme-dark');
+}
+
+function applyFiltersVisibility(collapsed)
+{
+	var controlsWrap = document.getElementById('recordingsControls');
+	var controlsBody = document.getElementById('recordingsControlsBody');
+	var toggleButton = document.getElementById('toggleFiltersButton');
+	if (!controlsWrap || !controlsBody || !toggleButton) {
+		return;
+	}
+
+	var shouldCollapse = (collapsed === true);
+	controlsWrap.classList.toggle('is-collapsed', shouldCollapse);
+	controlsBody.setAttribute('aria-hidden', shouldCollapse ? 'true' : 'false');
+	toggleButton.textContent = shouldCollapse ? 'Show Filters' : 'Hide Filters';
+	toggleButton.setAttribute('aria-expanded', shouldCollapse ? 'false' : 'true');
+	adjustRecordingsListHeight();
+}
+
+function toggleFiltersVisibility()
+{
+	var controlsWrap = document.getElementById('recordingsControls');
+	if (!controlsWrap) {
+		return;
+	}
+
+	var collapseNext = !controlsWrap.classList.contains('is-collapsed');
+	applyFiltersVisibility(collapseNext);
+	try {
+		window.localStorage.setItem('recordingsFiltersCollapsed', collapseNext ? '1' : '0');
+	} catch (error) {
+	}
+}
+
+function initFiltersVisibility()
+{
+	var collapsed = false;
+	try {
+		collapsed = window.localStorage.getItem('recordingsFiltersCollapsed') === '1';
+	} catch (error) {
+	}
+
+	applyFiltersVisibility(collapsed);
 }
 
 function adjustRecordingsListHeight()
@@ -1434,6 +1869,184 @@ function formatBytesForStatus(bytes)
 	}
 
 	return size.toFixed(2) + ' ' + units[unitIndex];
+}
+
+function formatPlaybackClock(totalSeconds)
+{
+	var numericSeconds = Number(totalSeconds);
+	if (!isFinite(numericSeconds) || numericSeconds < 0) {
+		return '0:00';
+	}
+
+	var roundedSeconds = Math.floor(numericSeconds);
+	var hours = Math.floor(roundedSeconds / 3600);
+	var minutes = Math.floor((roundedSeconds % 3600) / 60);
+	var seconds = roundedSeconds % 60;
+
+	if (hours > 0) {
+		return hours + ':' + String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
+	}
+
+	return minutes + ':' + String(seconds).padStart(2, '0');
+}
+
+function updateCustomPlayerUi()
+{
+	var audioPlayer = document.getElementById('audioPlayer');
+	var customPlayer = document.getElementById('customAudioPlayer');
+	var playPauseButton = document.getElementById('audioPlayPauseButton');
+	var skipBackButton = document.getElementById('audioSkipBackButton');
+	var skipForwardButton = document.getElementById('audioSkipForwardButton');
+	var seekBar = document.getElementById('audioSeekBar');
+	var currentTimeLabel = document.getElementById('audioCurrentTime');
+	var durationLabel = document.getElementById('audioDuration');
+
+	if (!audioPlayer || !customPlayer || !playPauseButton || !skipBackButton || !skipForwardButton || !seekBar || !currentTimeLabel || !durationLabel) {
+		return;
+	}
+
+	var hasSource = !!audioPlayer.getAttribute('src');
+	var duration = Number(audioPlayer.duration);
+	var currentTime = Number(audioPlayer.currentTime);
+	if (!isFinite(currentTime) || currentTime < 0) {
+		currentTime = 0;
+	}
+
+	var hasDuration = isFinite(duration) && duration > 0;
+
+	playPauseButton.disabled = !hasSource;
+	var playPauseLabel = audioPlayer.paused ? 'Play' : 'Pause';
+	playPauseButton.setAttribute('aria-label', playPauseLabel);
+	playPauseButton.setAttribute('title', playPauseLabel);
+	playPauseButton.classList.toggle('is-playing', hasSource && !audioPlayer.paused);
+
+	skipBackButton.disabled = !hasDuration;
+	skipForwardButton.disabled = !hasDuration;
+	skipBackButton.setAttribute('title', 'Back ' + playerSkipAmountSeconds + 's');
+	skipForwardButton.setAttribute('title', 'Forward ' + playerSkipAmountSeconds + 's');
+
+	seekBar.disabled = !hasDuration;
+	if (hasDuration) {
+		var progress = Math.min(1, Math.max(0, currentTime / duration));
+		seekBar.value = String(Math.round(progress * 1000));
+		seekBar.style.setProperty('--seek-progress', (progress * 100).toFixed(3) + '%');
+		durationLabel.textContent = formatPlaybackClock(duration);
+	} else {
+		seekBar.value = '0';
+		seekBar.style.setProperty('--seek-progress', '0%');
+		durationLabel.textContent = hasSource ? '?:??' : '0:00';
+	}
+
+	currentTimeLabel.textContent = formatPlaybackClock(currentTime);
+
+	customPlayer.classList.toggle('is-empty', !hasSource);
+	customPlayer.classList.toggle('is-playing', hasSource && !audioPlayer.paused);
+}
+
+function onCustomPlayPauseClicked()
+{
+	var audioPlayer = document.getElementById('audioPlayer');
+	if (!audioPlayer || !audioPlayer.getAttribute('src')) {
+		return;
+	}
+
+	if (audioPlayer.paused) {
+		var playPromise = audioPlayer.play();
+		if (playPromise && typeof playPromise.catch === 'function') {
+			playPromise.catch(function () {
+			});
+		}
+		return;
+	}
+
+	audioPlayer.pause();
+}
+
+function skipPlaybackBySeconds(offsetSeconds)
+{
+	var audioPlayer = document.getElementById('audioPlayer');
+	if (!audioPlayer) {
+		return;
+	}
+
+	var duration = Number(audioPlayer.duration);
+	if (!isFinite(duration) || duration <= 0) {
+		return;
+	}
+
+	var currentTime = Number(audioPlayer.currentTime);
+	if (!isFinite(currentTime) || currentTime < 0) {
+		currentTime = 0;
+	}
+
+	var targetTime = currentTime + Number(offsetSeconds);
+	if (!isFinite(targetTime)) {
+		targetTime = currentTime;
+	}
+
+	targetTime = Math.min(duration, Math.max(0, targetTime));
+	audioPlayer.currentTime = targetTime;
+	updateCustomPlayerUi();
+}
+
+function onSkipBackClicked()
+{
+	skipPlaybackBySeconds(-playerSkipAmountSeconds);
+}
+
+function onSkipForwardClicked()
+{
+	skipPlaybackBySeconds(playerSkipAmountSeconds);
+}
+
+function onCustomSeekChanged()
+{
+	var audioPlayer = document.getElementById('audioPlayer');
+	var seekBar = document.getElementById('audioSeekBar');
+	if (!audioPlayer || !seekBar) {
+		return;
+	}
+
+	var duration = Number(audioPlayer.duration);
+	if (!isFinite(duration) || duration <= 0) {
+		return;
+	}
+
+	var progress = Number(seekBar.value) / 1000;
+	if (!isFinite(progress)) {
+		progress = 0;
+	}
+
+	progress = Math.min(1, Math.max(0, progress));
+	seekBar.style.setProperty('--seek-progress', (progress * 100).toFixed(3) + '%');
+	audioPlayer.currentTime = duration * progress;
+	updateCustomPlayerUi();
+}
+
+function initializeCustomPlayerControls()
+{
+	var playPauseButton = document.getElementById('audioPlayPauseButton');
+	if (playPauseButton) {
+		playPauseButton.addEventListener('click', onCustomPlayPauseClicked);
+	}
+
+	var skipBackButton = document.getElementById('audioSkipBackButton');
+	if (skipBackButton) {
+		skipBackButton.addEventListener('click', onSkipBackClicked);
+	}
+
+	var skipForwardButton = document.getElementById('audioSkipForwardButton');
+	if (skipForwardButton) {
+		skipForwardButton.addEventListener('click', onSkipForwardClicked);
+	}
+
+	var seekBar = document.getElementById('audioSeekBar');
+	if (seekBar) {
+		seekBar.addEventListener('input', onCustomSeekChanged);
+		seekBar.addEventListener('change', onCustomSeekChanged);
+	}
+
+	updateCustomPlayerUi();
 }
 
 function buildStatusContextText()
@@ -1501,6 +2114,7 @@ function applySelectedToPlayer(autoPlay)
 		audioPlayer.removeAttribute('data-path');
 		audioPlayer.removeAttribute('src');
 		audioPlayer.load();
+		updateCustomPlayerUi();
 		return;
 	}
 
@@ -1529,6 +2143,8 @@ function applySelectedToPlayer(autoPlay)
 			});
 		}
 	}
+
+	updateCustomPlayerUi();
 }
 
 function selectRecording(path, autoPlay)
@@ -1685,6 +2301,46 @@ function isKeepPlayingEnabled()
 {
 	var checkbox = document.getElementById('keepPlayingChronologicallyCheckbox');
 	return !!(checkbox && checkbox.checked);
+}
+
+function initPlaybackOptionPreferences()
+{
+	var autoPlayCheckbox = document.getElementById('autoPlayNewCheckbox');
+	var keepPlayingCheckbox = document.getElementById('keepPlayingChronologicallyCheckbox');
+
+	try {
+		if (autoPlayCheckbox) {
+			var storedAutoPlay = window.localStorage.getItem('recordingsAutoPlayNewEnabled');
+			if (storedAutoPlay === '0' || storedAutoPlay === '1') {
+				autoPlayCheckbox.checked = (storedAutoPlay === '1');
+			}
+		}
+
+		if (keepPlayingCheckbox) {
+			var storedKeepPlaying = window.localStorage.getItem('recordingsKeepPlayingChronologicallyEnabled');
+			if (storedKeepPlaying === '0' || storedKeepPlaying === '1') {
+				keepPlayingCheckbox.checked = (storedKeepPlaying === '1');
+			}
+		}
+	} catch (error) {
+	}
+}
+
+function persistPlaybackOptionPreferences()
+{
+	var autoPlayCheckbox = document.getElementById('autoPlayNewCheckbox');
+	var keepPlayingCheckbox = document.getElementById('keepPlayingChronologicallyCheckbox');
+
+	try {
+		if (autoPlayCheckbox) {
+			window.localStorage.setItem('recordingsAutoPlayNewEnabled', autoPlayCheckbox.checked ? '1' : '0');
+		}
+
+		if (keepPlayingCheckbox) {
+			window.localStorage.setItem('recordingsKeepPlayingChronologicallyEnabled', keepPlayingCheckbox.checked ? '1' : '0');
+		}
+	} catch (error) {
+	}
 }
 
 function playNextChronological()
@@ -1859,6 +2515,8 @@ function tryStartPendingAutoPlay()
 
 function onAutoPlayNewCheckboxChanged()
 {
+	persistPlaybackOptionPreferences();
+
 	if (!isAutoPlayNewEnabled()) {
 		if (pendingAutoPlayPaths.length > 0) {
 			pendingAutoPlayPaths = [];
@@ -1868,6 +2526,20 @@ function onAutoPlayNewCheckboxChanged()
 	}
 
 	tryStartPendingAutoPlay();
+}
+
+function onKeepPlayingChronologicallyCheckboxChanged()
+{
+	persistPlaybackOptionPreferences();
+
+	if (!isKeepPlayingEnabled()) {
+		return;
+	}
+
+	// If nothing is selected yet, start from the oldest recording.
+	if (!selectedPath || !isAudioPlayerActivelyPlaying()) {
+		playNextChronological();
+	}
 }
 
 function onAudioPlayerEnded()
@@ -1939,7 +2611,7 @@ function renderRecordings(groups)
 
 	if (!groups || groups.length === 0) {
 		var emptyMessage = document.createElement('div');
-		emptyMessage.textContent = 'No WAV/MP3/OGG recordings found in /mnt/Media/recordings.';
+		emptyMessage.textContent = 'No WAV/MP3/OGG recordings found.';
 		recordingsList.appendChild(emptyMessage);
 		return;
 	}
@@ -2178,6 +2850,9 @@ function refreshRecordings(manualRefresh)
 function startRecordingsPage()
 {
 	initTheme();
+	initFiltersVisibility();
+	initializeCustomPlayerControls();
+	initPlaybackOptionPreferences();
 	var filterInput = document.getElementById('recordingsFilterInput');
 	if (filterInput) {
 		filterInput.addEventListener('input', onFilterInputChanged);
@@ -2203,20 +2878,20 @@ function startRecordingsPage()
 
 	var keepPlayingCheckbox = document.getElementById('keepPlayingChronologicallyCheckbox');
 	if (keepPlayingCheckbox) {
-		keepPlayingCheckbox.addEventListener('change', function () {
-			if (!isKeepPlayingEnabled()) {
-				return;
-			}
-			// If nothing is selected yet, start from the oldest recording.
-			if (!selectedPath || !isAudioPlayerActivelyPlaying()) {
-				playNextChronological();
-			}
-		});
+		keepPlayingCheckbox.addEventListener('change', onKeepPlayingChronologicallyCheckboxChanged);
 	}
 
 	var audioPlayer = document.getElementById('audioPlayer');
 	if (audioPlayer) {
 		audioPlayer.addEventListener('ended', onAudioPlayerEnded);
+		audioPlayer.addEventListener('play', updateCustomPlayerUi);
+		audioPlayer.addEventListener('pause', updateCustomPlayerUi);
+		audioPlayer.addEventListener('loadedmetadata', updateCustomPlayerUi);
+		audioPlayer.addEventListener('durationchange', updateCustomPlayerUi);
+		audioPlayer.addEventListener('timeupdate', updateCustomPlayerUi);
+		audioPlayer.addEventListener('emptied', updateCustomPlayerUi);
+		audioPlayer.addEventListener('seeking', updateCustomPlayerUi);
+		audioPlayer.addEventListener('seeked', updateCustomPlayerUi);
 	}
 
 	adjustRecordingsListHeight();
