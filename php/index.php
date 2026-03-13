@@ -1,8 +1,9 @@
 <?php
 
 // Settings
-$recordingsRoot = '/mnt/Media/recordings';
+$recordingsRoot = '/opt/recordings/';
 $PAGE_TITLE = 'Icecast Stream Recordings';
+$supportedRecordingExtensions = array('wav', 'mp3', 'ogg');
 
 // End Settings
 
@@ -118,6 +119,293 @@ function formatDuration(?float $seconds): string
 	return sprintf('%d:%02d', $minutes, $remainingSeconds);
 }
 
+function getRecordingMimeType(string $extension): string
+{
+	$normalizedExtension = strtolower($extension);
+	if ($normalizedExtension === 'mp3') {
+		return 'audio/mpeg';
+	}
+
+	if ($normalizedExtension === 'ogg') {
+		return 'audio/ogg';
+	}
+
+	return 'audio/wav';
+}
+
+function decodeSynchsafeInt(string $bytes): int
+{
+	if (strlen($bytes) !== 4) {
+		return 0;
+	}
+
+	return ((ord($bytes[0]) & 0x7F) << 21)
+		| ((ord($bytes[1]) & 0x7F) << 14)
+		| ((ord($bytes[2]) & 0x7F) << 7)
+		| (ord($bytes[3]) & 0x7F);
+}
+
+function estimateMp3DurationSeconds(string $fullPath, int $fileSize): ?float
+{
+	$handle = fopen($fullPath, 'rb');
+	if ($handle === false) {
+		return null;
+	}
+
+	$dataOffset = 0;
+	$id3Header = fread($handle, 10);
+	if ($id3Header !== false && strlen($id3Header) === 10 && substr($id3Header, 0, 3) === 'ID3') {
+		$dataOffset = 10 + decodeSynchsafeInt(substr($id3Header, 6, 4));
+	}
+
+	fseek($handle, $dataOffset);
+	$scanBytes = fread($handle, 131072);
+	fclose($handle);
+
+	if ($scanBytes === false || strlen($scanBytes) < 4) {
+		return null;
+	}
+
+	$bitrateTableMpeg1 = array(
+		3 => array(0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0),
+		2 => array(0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0),
+		1 => array(0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0),
+	);
+
+	$bitrateTableMpeg2 = array(
+		3 => array(0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0),
+		2 => array(0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0),
+		1 => array(0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0),
+	);
+
+	$sampleRateTable = array(
+		3 => array(44100, 48000, 32000),
+		2 => array(22050, 24000, 16000),
+		0 => array(11025, 12000, 8000),
+	);
+
+	$scanLength = strlen($scanBytes);
+	for ($offset = 0; $offset <= ($scanLength - 4); $offset++) {
+		$headerData = unpack('Nheader', substr($scanBytes, $offset, 4));
+		$header = isset($headerData['header']) ? (int)$headerData['header'] : 0;
+
+		if (($header & 0xFFE00000) !== 0xFFE00000) {
+			continue;
+		}
+
+		$versionBits = ($header >> 19) & 0x3;
+		$layerBits = ($header >> 17) & 0x3;
+		$bitrateIndex = ($header >> 12) & 0xF;
+		$sampleRateIndex = ($header >> 10) & 0x3;
+		$paddingBit = ($header >> 9) & 0x1;
+		$channelMode = ($header >> 6) & 0x3;
+
+		if ($versionBits === 1 || $layerBits === 0 || $bitrateIndex === 0 || $bitrateIndex === 15 || $sampleRateIndex === 3) {
+			continue;
+		}
+
+		if (!isset($sampleRateTable[$versionBits][$sampleRateIndex])) {
+			continue;
+		}
+
+		$sampleRate = (int)$sampleRateTable[$versionBits][$sampleRateIndex];
+		$bitrateTable = ($versionBits === 3) ? $bitrateTableMpeg1 : $bitrateTableMpeg2;
+		if (!isset($bitrateTable[$layerBits][$bitrateIndex])) {
+			continue;
+		}
+
+		$bitrateKbps = (int)$bitrateTable[$layerBits][$bitrateIndex];
+		if ($bitrateKbps <= 0 || $sampleRate <= 0) {
+			continue;
+		}
+
+		$samplesPerFrame = 1152;
+		$frameLength = 0;
+		if ($layerBits === 3) {
+			$samplesPerFrame = 384;
+			$frameLength = (int)(floor((12 * $bitrateKbps * 1000) / $sampleRate) + $paddingBit) * 4;
+		} elseif ($layerBits === 2) {
+			$samplesPerFrame = 1152;
+			$frameLength = (int)(floor((144 * $bitrateKbps * 1000) / $sampleRate) + $paddingBit);
+		} elseif ($layerBits === 1) {
+			$samplesPerFrame = ($versionBits === 3) ? 1152 : 576;
+			if ($versionBits === 3) {
+				$frameLength = (int)(floor((144 * $bitrateKbps * 1000) / $sampleRate) + $paddingBit);
+			} else {
+				$frameLength = (int)(floor((72 * $bitrateKbps * 1000) / $sampleRate) + $paddingBit);
+			}
+		}
+
+		if ($frameLength <= 0) {
+			continue;
+		}
+
+		// Prefer Xing/Info frame count when present for better VBR accuracy.
+		if ($layerBits === 1) {
+			$sideInfoLength = 0;
+			if ($versionBits === 3) {
+				$sideInfoLength = ($channelMode === 3) ? 17 : 32;
+			} else {
+				$sideInfoLength = ($channelMode === 3) ? 9 : 17;
+			}
+
+			$xingOffset = $offset + 4 + $sideInfoLength;
+			if (($xingOffset + 8) <= $scanLength) {
+				$xingTag = substr($scanBytes, $xingOffset, 4);
+				if ($xingTag === 'Xing' || $xingTag === 'Info') {
+					$flagsData = unpack('Nflags', substr($scanBytes, $xingOffset + 4, 4));
+					$flags = isset($flagsData['flags']) ? (int)$flagsData['flags'] : 0;
+					if (($flags & 0x1) === 0x1 && ($xingOffset + 12) <= $scanLength) {
+						$framesData = unpack('Nframes', substr($scanBytes, $xingOffset + 8, 4));
+						$frameCount = isset($framesData['frames']) ? (int)$framesData['frames'] : 0;
+						if ($frameCount > 0) {
+							return (float)($frameCount * $samplesPerFrame) / $sampleRate;
+						}
+					}
+				}
+			}
+		}
+
+		$audioBytes = max(0, $fileSize - ($dataOffset + $offset));
+		if ($audioBytes <= 0) {
+			return null;
+		}
+
+		return ((float)$audioBytes * 8.0) / ((float)$bitrateKbps * 1000.0);
+	}
+
+	return null;
+}
+
+function estimateOggDurationSeconds(string $fullPath, int $fileSize): ?float
+{
+	$handle = fopen($fullPath, 'rb');
+	if ($handle === false) {
+		return null;
+	}
+
+	$sampleRate = null;
+	for ($pageCount = 0; $pageCount < 24 && !feof($handle); $pageCount++) {
+		$pageHeader = fread($handle, 27);
+		if ($pageHeader === false || strlen($pageHeader) < 27) {
+			break;
+		}
+
+		if (substr($pageHeader, 0, 4) !== 'OggS') {
+			break;
+		}
+
+		$segmentCount = ord($pageHeader[26]);
+		$lacingValues = ($segmentCount > 0) ? fread($handle, $segmentCount) : '';
+		if ($segmentCount > 0 && ($lacingValues === false || strlen($lacingValues) < $segmentCount)) {
+			break;
+		}
+
+		$payloadSize = 0;
+		for ($segmentIndex = 0; $segmentIndex < $segmentCount; $segmentIndex++) {
+			$payloadSize += ord($lacingValues[$segmentIndex]);
+		}
+
+		$payload = ($payloadSize > 0) ? fread($handle, $payloadSize) : '';
+		if ($payloadSize > 0 && ($payload === false || strlen($payload) < $payloadSize)) {
+			break;
+		}
+
+		if ($sampleRate === null && is_string($payload) && strlen($payload) >= 16 && substr($payload, 0, 7) === "\x01vorbis") {
+			$sampleRateData = unpack('VsampleRate', substr($payload, 12, 4));
+			if (isset($sampleRateData['sampleRate']) && (int)$sampleRateData['sampleRate'] > 0) {
+				$sampleRate = (int)$sampleRateData['sampleRate'];
+			}
+		}
+
+		if ($sampleRate === null && is_string($payload) && strlen($payload) >= 12 && substr($payload, 0, 8) === 'OpusHead') {
+			$sampleRate = 48000;
+		}
+
+		if ($sampleRate !== null) {
+			break;
+		}
+	}
+
+	fclose($handle);
+
+	if ($sampleRate === null || $sampleRate <= 0 || $fileSize <= 0) {
+		return null;
+	}
+
+	$tailHandle = fopen($fullPath, 'rb');
+	if ($tailHandle === false) {
+		return null;
+	}
+
+	$tailBytes = min($fileSize, 524288);
+	if ($tailBytes <= 0) {
+		fclose($tailHandle);
+		return null;
+	}
+
+	fseek($tailHandle, $fileSize - $tailBytes);
+	$tailData = fread($tailHandle, $tailBytes);
+	fclose($tailHandle);
+
+	if ($tailData === false || strlen($tailData) < 14) {
+		return null;
+	}
+
+	$searchLength = strlen($tailData);
+	$lastGranule = null;
+
+	while ($searchLength > 0) {
+		$candidate = strrpos(substr($tailData, 0, $searchLength), 'OggS');
+		if ($candidate === false) {
+			break;
+		}
+
+		if (($candidate + 14) <= strlen($tailData)) {
+			$granuleBytes = substr($tailData, $candidate + 6, 8);
+			$granuleParts = unpack('Vlow/Vhigh', $granuleBytes);
+			if (isset($granuleParts['low'], $granuleParts['high'])) {
+				$low = (int)$granuleParts['low'];
+				$high = (int)$granuleParts['high'];
+
+				if (!($high === 0xFFFFFFFF && $low === 0xFFFFFFFF)) {
+					$granulePosition = ((float)$high * 4294967296.0) + (float)$low;
+					if ($granulePosition > 0) {
+						$lastGranule = $granulePosition;
+						break;
+					}
+				}
+			}
+		}
+
+		$searchLength = $candidate;
+	}
+
+	if ($lastGranule === null) {
+		return null;
+	}
+
+	return $lastGranule / (float)$sampleRate;
+}
+
+function estimateRecordingDurationSeconds(string $fullPath, int $fileSize, string $extension): ?float
+{
+	$normalizedExtension = strtolower($extension);
+	if ($normalizedExtension === 'wav') {
+		return estimateWavDurationSeconds($fullPath, $fileSize);
+	}
+
+	if ($normalizedExtension === 'mp3') {
+		return estimateMp3DurationSeconds($fullPath, $fileSize);
+	}
+
+	if ($normalizedExtension === 'ogg') {
+		return estimateOggDurationSeconds($fullPath, $fileSize);
+	}
+
+	return null;
+}
+
 function estimateWavDurationSeconds(string $fullPath, int $fileSize): ?float
 {
 	$handle = fopen($fullPath, 'rb');
@@ -203,7 +491,7 @@ function estimateWavDurationSeconds(string $fullPath, int $fileSize): ?float
 	return null;
 }
 
-function listRecordings(string $rootDirectory): array
+function listRecordings(string $rootDirectory, array $allowedExtensions): array
 {
 	$realRoot = realpath($rootDirectory);
 	if ($realRoot === false || !is_dir($realRoot)) {
@@ -225,7 +513,8 @@ function listRecordings(string $rootDirectory): array
 			continue;
 		}
 
-		if (strtolower((string)$fileInfo->getExtension()) !== 'wav') {
+		$extension = strtolower((string)$fileInfo->getExtension());
+		if (!in_array($extension, $allowedExtensions, true)) {
 			continue;
 		}
 
@@ -235,12 +524,13 @@ function listRecordings(string $rootDirectory): array
 		$modifiedAt = (int)$fileInfo->getMTime();
 		$parsedTimestamp = parseRecordingTimestamp($relativePath, $modifiedAt);
 		$sizeBytes = (int)$fileInfo->getSize();
-		$durationSeconds = estimateWavDurationSeconds($fullPath, $sizeBytes);
+		$durationSeconds = estimateRecordingDurationSeconds($fullPath, $sizeBytes, $extension);
 
 		$items[] = array(
 			'path' => $relativePath,
 			'name' => $fileName,
 			'name_pretty' => prettifyRecordingName($fileName),
+			'content_type' => getRecordingMimeType($extension),
 			'timestamp' => $parsedTimestamp,
 			'timestamp_iso' => date('Y-m-d H:i:s', $parsedTimestamp),
 			'date' => date('Y-m-d', $parsedTimestamp),
@@ -287,7 +577,7 @@ function listRecordings(string $rootDirectory): array
 	);
 }
 
-function streamRecording(string $rootDirectory, string $requestedPath, bool $forceDownload = false): void
+function streamRecording(string $rootDirectory, array $allowedExtensions, string $requestedPath, bool $forceDownload = false): void
 {
 	$realRoot = realpath($rootDirectory);
 	if ($realRoot === false || !is_dir($realRoot)) {
@@ -316,9 +606,10 @@ function streamRecording(string $rootDirectory, string $requestedPath, bool $for
 		exit;
 	}
 
-	if (strtolower((string)pathinfo($fullPath, PATHINFO_EXTENSION)) !== 'wav') {
+	$extension = strtolower((string)pathinfo($fullPath, PATHINFO_EXTENSION));
+	if (!in_array($extension, $allowedExtensions, true)) {
 		http_response_code(400);
-		echo 'Only WAV files are supported.';
+		echo 'Unsupported recording file type.';
 		exit;
 	}
 
@@ -363,7 +654,7 @@ function streamRecording(string $rootDirectory, string $requestedPath, bool $for
 
 	$contentLength = ($rangeEnd - $rangeStart) + 1;
 
-	header('Content-Type: audio/wav');
+	header('Content-Type: ' . getRecordingMimeType($extension));
 	header('Accept-Ranges: bytes');
 	header('Cache-Control: no-cache, no-store, must-revalidate');
 	header('Content-Disposition: ' . ($forceDownload ? 'attachment' : 'inline') . '; filename="' . basename($fullPath) . '"');
@@ -413,7 +704,7 @@ function streamRecording(string $rootDirectory, string $requestedPath, bool $for
 
 $ajaxAction = isset($_GET['ajax']) ? (string)$_GET['ajax'] : '';
 if ($ajaxAction === 'list') {
-	$payload = listRecordings($recordingsRoot);
+	$payload = listRecordings($recordingsRoot, $supportedRecordingExtensions);
 	if ($payload['ok'] !== true) {
 		sendJsonResponse($payload, 500);
 	}
@@ -424,7 +715,141 @@ if ($ajaxAction === 'list') {
 if ($ajaxAction === 'stream') {
 	$requestedFile = isset($_GET['file']) ? (string)$_GET['file'] : '';
 	$forceDownload = isset($_GET['download']) && (string)$_GET['download'] === '1';
-	streamRecording($recordingsRoot, $requestedFile, $forceDownload);
+	streamRecording($recordingsRoot, $supportedRecordingExtensions, $requestedFile, $forceDownload);
+}
+
+if ($ajaxAction === 'zip') {
+	$nameFilter = isset($_GET['filter']) ? strtolower(trim((string)$_GET['filter'])) : '';
+	$startTs = isset($_GET['start']) && $_GET['start'] !== '' ? (int)$_GET['start'] : 0;
+	$endTs = isset($_GET['end']) && $_GET['end'] !== '' ? (int)$_GET['end'] : 0;
+	zipRecordingsFiltered($recordingsRoot, $supportedRecordingExtensions, $nameFilter, $startTs, $endTs);
+}
+
+function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, string $nameFilter, int $startTs, int $endTs): void
+{
+	if (!class_exists('ZipArchive')) {
+		http_response_code(500);
+		header('Content-Type: text/plain');
+		echo 'ZIP support (ZipArchive) is not available on this server.';
+		exit;
+	}
+
+	$data = listRecordings($rootDirectory, $allowedExtensions);
+	if ($data['ok'] !== true) {
+		http_response_code(500);
+		header('Content-Type: text/plain');
+		echo isset($data['error']) ? $data['error'] : 'Failed to list recordings.';
+		exit;
+	}
+
+	$realRoot = realpath($rootDirectory);
+	if ($realRoot === false) {
+		http_response_code(500);
+		header('Content-Type: text/plain');
+		echo 'Recordings directory is not available.';
+		exit;
+	}
+
+	$matchingFiles = array();
+	foreach ($data['groups'] as $group) {
+		foreach ($group['items'] as $item) {
+			if ($nameFilter !== '') {
+				$prettyName = strtolower((string)$item['name_pretty']);
+				$rawName = strtolower((string)$item['name']);
+				if (strpos($prettyName, $nameFilter) === false && strpos($rawName, $nameFilter) === false) {
+					continue;
+				}
+			}
+
+			$ts = (int)$item['timestamp'];
+			if ($startTs > 0 && $ts < $startTs) {
+				continue;
+			}
+
+			if ($endTs > 0 && $ts > $endTs) {
+				continue;
+			}
+
+			$matchingFiles[] = $item;
+		}
+	}
+
+	if (empty($matchingFiles)) {
+		http_response_code(404);
+		header('Content-Type: text/plain');
+		echo 'No recordings match the current filters.';
+		exit;
+	}
+
+	$tmpFile = tempnam(sys_get_temp_dir(), 'recordings_zip_');
+	if ($tmpFile === false) {
+		http_response_code(500);
+		header('Content-Type: text/plain');
+		echo 'Failed to create temporary file for ZIP archive.';
+		exit;
+	}
+
+	$zip = new ZipArchive();
+	if ($zip->open($tmpFile, ZipArchive::OVERWRITE) !== true) {
+		@unlink($tmpFile);
+		http_response_code(500);
+		header('Content-Type: text/plain');
+		echo 'Failed to open ZIP archive for writing.';
+		exit;
+	}
+
+	// Build the M3U playlist in chronological order (oldest first).
+	$playlistItems = array_reverse($matchingFiles);
+	$m3uLines = array('#EXTM3U');
+	foreach ($playlistItems as $item) {
+		$normalizedPath = normalizeRelativePath((string)$item['path']);
+		if ($normalizedPath === '') {
+			continue;
+		}
+
+		$fullPath = $realRoot . DIRECTORY_SEPARATOR . $normalizedPath;
+		$resolvedPath = realpath($fullPath);
+		if ($resolvedPath === false || !is_file($resolvedPath)) {
+			continue;
+		}
+
+		if (strpos($resolvedPath, $realRoot . DIRECTORY_SEPARATOR) !== 0) {
+			continue;
+		}
+
+		$durationSeconds = ($item['duration_seconds'] !== null && $item['duration_seconds'] > 0)
+			? (int)round((float)$item['duration_seconds'])
+			: -1;
+		$title = $item['timestamp_iso'] . ' - ' . $item['name_pretty'];
+		$zipAudioPath = 'audio/' . $normalizedPath;
+		$m3uLines[] = '#EXTINF:' . $durationSeconds . ',' . $title;
+		$m3uLines[] = $zipAudioPath;
+		$zip->addFile($resolvedPath, $zipAudioPath);
+	}
+
+	$zip->addFromString('recordings.m3u', implode("\n", $m3uLines) . "\n");
+
+	$zip->close();
+
+	$zipSize = filesize($tmpFile);
+	if ($zipSize === false || $zipSize === 0) {
+		@unlink($tmpFile);
+		http_response_code(500);
+		header('Content-Type: text/plain');
+		echo 'ZIP archive could not be generated.';
+		exit;
+	}
+
+	$zipName = 'recordings_' . date('Y-m-d') . '.zip';
+	header('Content-Type: application/zip');
+	header('Content-Disposition: attachment; filename="' . $zipName . '"');
+	header('Content-Length: ' . $zipSize);
+	header('Cache-Control: no-cache, no-store, must-revalidate');
+
+	set_time_limit(0);
+	readfile($tmpFile);
+	@unlink($tmpFile);
+	exit;
 }
 
 ?><!DOCTYPE html>
@@ -603,6 +1028,12 @@ if ($ajaxAction === 'stream') {
 		font-family: monospace;
 	}
 
+	.recording-content-type {
+		width: 120px;
+		white-space: nowrap;
+		font-family: monospace;
+	}
+
 	.recording-download {
 		width: 92px;
 		text-align: center;
@@ -674,6 +1105,13 @@ if ($ajaxAction === 'stream') {
 		white-space: nowrap;
 	}
 
+	.checkbox-stack {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		flex: 0 0 auto;
+	}
+
 	.status-text {
 		flex: 1 1 240px;
 	}
@@ -705,6 +1143,61 @@ if ($ajaxAction === 'stream') {
 
 	.theme-button {
 		min-width: 120px;
+	}
+
+	.export-zip-button {
+		min-height: 34px;
+		padding: 6px 10px;
+		white-space: nowrap;
+		border: 1px solid #2a5a2a;
+		border-radius: 4px;
+		background-color: #1a3a1a;
+		color: #7cdb7c;
+		cursor: pointer;
+	}
+
+	body.theme-light .export-zip-button {
+		border-color: #5a9a5a;
+		background-color: #eaf5ea;
+		color: #1a4d1a;
+	}
+
+	.export-zip-button:hover {
+		background-color: #234a23;
+	}
+
+	body.theme-light .export-zip-button:hover {
+		background-color: #d4ecd4;
+	}
+
+	.recordings-filter-range-label {
+		font-size: 13px;
+		white-space: nowrap;
+	}
+
+	.recordings-filter-datetime {
+		min-height: 34px;
+		padding: 6px 8px;
+		border: 1px solid #4a4a4a;
+		border-radius: 4px;
+		background-color: #141414;
+		color: #efefef;
+		font-size: 13px;
+		flex: 0 0 auto;
+	}
+
+	body.theme-light .recordings-filter-datetime {
+		border-color: #b9c4d1;
+		background-color: #ffffff;
+		color: #1f2a34;
+	}
+
+	.recordings-controls-row {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 10px;
+		width: 100%;
 	}
 
 	.recordings-layout {
@@ -782,7 +1275,9 @@ if ($ajaxAction === 'stream') {
 		}
 
 		.recordings-filter-label,
-		.autoplay-new-label {
+		.recordings-filter-range-label,
+		.autoplay-new-label,
+		.checkbox-stack {
 			width: 100%;
 		}
 
@@ -791,12 +1286,17 @@ if ($ajaxAction === 'stream') {
 			flex: 1 1 100%;
 		}
 
+		.recordings-filter-datetime {
+			flex: 1 1 160px;
+		}
+
 		.recording-table {
 			min-width: 500px;
 		}
 
-		.refresh-button {
-			width: 100%;
+		.refresh-button,
+		.export-zip-button {
+			width: 32%;
 		}
 	}
 </style>
@@ -804,10 +1304,12 @@ if ($ajaxAction === 'stream') {
 <h2><?=$PAGE_TITLE?></h2>
 <div class="status-row">
 	<span id="statusText" class="status-text">Loading recordings...</span>
+</div>
+<div style="text-align: center; margin-bottom: 10px;">
 	<button type="button" class="refresh-button" onclick="refreshRecordings(true)">Refresh Now</button>
+	<button type="button" class="refresh-button" onclick="document.documentElement.requestFullscreen();">Fullscreen</button>
 	<button type="button" id="themeToggleButton" class="refresh-button theme-button" onclick="toggleTheme()">Theme: Dark</button>
 </div>
-
 
 <div class="recordings-layout">
 	<div class="recordings-player-col">
@@ -824,9 +1326,21 @@ if ($ajaxAction === 'stream') {
 	<div class="recordings-list-col">
 		<div class="recordings-panel">
 			<div class="recordings-controls">
-				<label for="recordingsFilterInput" class="recordings-filter-label">Filter by name:</label>
-				<input type="text" id="recordingsFilterInput" class="recordings-filter-input" placeholder="Type to filter recordings..." autocomplete="off" />
-				<label class="autoplay-new-label" for="autoPlayNewCheckbox"><input type="checkbox" id="autoPlayNewCheckbox" /> Auto play new recordings</label>
+				<div class="recordings-controls-row">
+					<label for="recordingsFilterInput" class="recordings-filter-label">Filter by name:</label>
+					<input type="text" id="recordingsFilterInput" class="recordings-filter-input" placeholder="Type to filter recordings..." autocomplete="off" />
+					<div class="checkbox-stack">
+						<label class="autoplay-new-label" for="autoPlayNewCheckbox"><input type="checkbox" id="autoPlayNewCheckbox" /> Auto play new recordings</label>
+						<label class="autoplay-new-label" for="keepPlayingChronologicallyCheckbox"><input type="checkbox" id="keepPlayingChronologicallyCheckbox" /> Keep playing chronologically</label>
+					</div>
+				</div>
+				<div class="recordings-controls-row">
+					<label for="recordingsFilterStart" class="recordings-filter-range-label">From:</label>
+					<input type="datetime-local" id="recordingsFilterStart" class="recordings-filter-datetime" title="Filter recordings from this date/time (leave blank for no start limit)" />
+					<label for="recordingsFilterEnd" class="recordings-filter-range-label">To:</label>
+					<input type="datetime-local" id="recordingsFilterEnd" class="recordings-filter-datetime" title="Filter recordings up to this date/time (leave blank for no end limit)" />
+					<button type="button" id="exportZipButton" class="export-zip-button" onclick="exportFilteredZip()" title="Download all filtered recordings as a ZIP archive">Export ZIP (0)</button>
+				</div>
 			</div>
 			<div class="recordings-list-wrap" id="recordingsList"></div>
 		</div>
@@ -890,7 +1404,7 @@ function adjustRecordingsListHeight()
 
 	var rect = recordingsListWrap.getBoundingClientRect();
 	var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-	var bottomPadding = 12;
+	var bottomPadding = 32;
 	var availableHeight = viewportHeight - rect.top - bottomPadding;
 	var minHeight = 220;
 
@@ -993,6 +1507,9 @@ function applySelectedToPlayer(autoPlay)
 	var recording = recordingsByPath[selectedPath];
 	titleElement.textContent = recording.time_display + ' - ' + recording.name_pretty;
 	metaElement.textContent = recording.path + ' • ' + recording.duration_display + ' • ' + recording.size_human;
+	if (recording.content_type) {
+		metaElement.textContent += ' • ' + recording.content_type;
+	}
 
 	var streamUrl = '?ajax=stream&file=' + encodeURIComponent(recording.path) + '&v=' + recording.mtime;
 	var downloadUrl = '?ajax=stream&file=' + encodeURIComponent(recording.path) + '&download=1&v=' + recording.mtime;
@@ -1042,6 +1559,48 @@ function getRecordingNameFilterValue()
 	return String(filterInput.value || '').toLowerCase().trim();
 }
 
+function getDateRangeFilter()
+{
+	var startInput = document.getElementById('recordingsFilterStart');
+	var endInput = document.getElementById('recordingsFilterEnd');
+	var startTs = null;
+	var endTs = null;
+
+	if (startInput && startInput.value !== '') {
+		var startDate = new Date(startInput.value);
+		if (!isNaN(startDate.getTime())) {
+			startTs = Math.floor(startDate.getTime() / 1000);
+		}
+	}
+
+	if (endInput && endInput.value !== '') {
+		var endDate = new Date(endInput.value);
+		if (!isNaN(endDate.getTime())) {
+			endTs = Math.floor(endDate.getTime() / 1000);
+		}
+	}
+
+	return { startTs: startTs, endTs: endTs };
+}
+
+function recordingMatchesDateRange(recording, dateRange)
+{
+	if (!dateRange) {
+		return true;
+	}
+
+	var ts = parseInt(recording.timestamp, 10);
+	if (dateRange.startTs !== null && ts < dateRange.startTs) {
+		return false;
+	}
+
+	if (dateRange.endTs !== null && ts > dateRange.endTs) {
+		return false;
+	}
+
+	return true;
+}
+
 function recordingMatchesFilter(recording, normalizedFilter)
 {
 	if (normalizedFilter === '') {
@@ -1054,13 +1613,16 @@ function recordingMatchesFilter(recording, normalizedFilter)
 	return prettyName.indexOf(normalizedFilter) !== -1 || rawName.indexOf(normalizedFilter) !== -1;
 }
 
-function filterRecordingGroups(groups, normalizedFilter)
+function filterRecordingGroups(groups, normalizedFilter, dateRange)
 {
 	if (!groups || groups.length === 0) {
 		return [];
 	}
 
-	if (normalizedFilter === '') {
+	var hasNameFilter = normalizedFilter !== '';
+	var hasDateRange = !!(dateRange && (dateRange.startTs !== null || dateRange.endTs !== null));
+
+	if (!hasNameFilter && !hasDateRange) {
 		return groups;
 	}
 
@@ -1071,9 +1633,15 @@ function filterRecordingGroups(groups, normalizedFilter)
 
 		for (var itemIndex = 0; itemIndex < group.items.length; itemIndex++) {
 			var recording = group.items[itemIndex];
-			if (recordingMatchesFilter(recording, normalizedFilter)) {
-				filteredItems.push(recording);
+			if (!recordingMatchesFilter(recording, normalizedFilter)) {
+				continue;
 			}
+
+			if (!recordingMatchesDateRange(recording, dateRange)) {
+				continue;
+			}
+
+			filteredItems.push(recording);
 		}
 
 		if (filteredItems.length > 0) {
@@ -1113,13 +1681,60 @@ function sumRecordingSizeBytesInGroups(groups)
 	return totalBytes;
 }
 
+function isKeepPlayingEnabled()
+{
+	var checkbox = document.getElementById('keepPlayingChronologicallyCheckbox');
+	return !!(checkbox && checkbox.checked);
+}
+
+function playNextChronological()
+{
+	if (!isKeepPlayingEnabled()) {
+		return false;
+	}
+
+	var normalizedFilter = getRecordingNameFilterValue();
+	var dateRange = getDateRangeFilter();
+	var filteredGroups = filterRecordingGroups(allRecordingsGroups, normalizedFilter, dateRange);
+
+	// Flatten newest-first then reverse to get oldest-first chronological order.
+	var flatItems = [];
+	for (var gi = 0; gi < filteredGroups.length; gi++) {
+		var items = filteredGroups[gi].items;
+		for (var ii = 0; ii < items.length; ii++) {
+			flatItems.push(items[ii]);
+		}
+	}
+	flatItems.reverse();
+
+	if (flatItems.length === 0) {
+		return false;
+	}
+
+	var currentIndex = -1;
+	for (var idx = 0; idx < flatItems.length; idx++) {
+		if (flatItems[idx].path === selectedPath) {
+			currentIndex = idx;
+			break;
+		}
+	}
+
+	var nextIndex = currentIndex + 1;
+	if (nextIndex >= flatItems.length) {
+		return false;
+	}
+
+	selectRecording(flatItems[nextIndex].path, true);
+	return true;
+}
+
 function isAutoPlayNewEnabled()
 {
 	var checkbox = document.getElementById('autoPlayNewCheckbox');
 	return !!(checkbox && checkbox.checked);
 }
 
-function collectNewMatchingPaths(groups, previousByPath, normalizedFilter)
+function collectNewMatchingPaths(groups, previousByPath, normalizedFilter, dateRange)
 {
 	var newPaths = [];
 
@@ -1131,9 +1746,15 @@ function collectNewMatchingPaths(groups, previousByPath, normalizedFilter)
 				continue;
 			}
 
-			if (recordingMatchesFilter(recording, normalizedFilter)) {
-				newPaths.push(recording.path);
+			if (!recordingMatchesFilter(recording, normalizedFilter)) {
+				continue;
 			}
+
+			if (!recordingMatchesDateRange(recording, dateRange)) {
+				continue;
+			}
+
+			newPaths.push(recording.path);
 		}
 	}
 
@@ -1251,13 +1872,18 @@ function onAutoPlayNewCheckboxChanged()
 
 function onAudioPlayerEnded()
 {
+	if (playNextChronological()) {
+		return;
+	}
+
 	tryStartPendingAutoPlay();
 }
 
 function applyCurrentFilterAndRender(autoPlay)
 {
 	var normalizedFilter = getRecordingNameFilterValue();
-	var filteredGroups = filterRecordingGroups(allRecordingsGroups, normalizedFilter);
+	var dateRange = getDateRangeFilter();
+	var filteredGroups = filterRecordingGroups(allRecordingsGroups, normalizedFilter, dateRange);
 	shownRecordingsSizeBytes = sumRecordingSizeBytesInGroups(filteredGroups);
 	var visibleByPath = {};
 
@@ -1267,6 +1893,12 @@ function applyCurrentFilterAndRender(autoPlay)
 			var recording = group.items[itemIndex];
 			visibleByPath[recording.path] = true;
 		}
+	}
+
+	var filteredCount = countRecordingsInGroups(filteredGroups);
+	var exportBtn = document.getElementById('exportZipButton');
+	if (exportBtn) {
+		exportBtn.textContent = 'Export ZIP (' + filteredCount + ')';
 	}
 
 	renderRecordings(filteredGroups);
@@ -1294,7 +1926,9 @@ function onFilterInputChanged()
 	var shownCount = applyCurrentFilterAndRender(false);
 	tryStartPendingAutoPlay();
 	var normalizedFilter = getRecordingNameFilterValue();
-	var filterSuffix = normalizedFilter === '' ? '' : ' (filtered)';
+	var dateRange = getDateRangeFilter();
+	var isFiltered = normalizedFilter !== '' || (dateRange.startTs !== null || dateRange.endTs !== null);
+	var filterSuffix = isFiltered ? ' (filtered)' : '';
 	setStatus(shownCount + ' recording(s) shown' + filterSuffix + '.', false);
 }
 
@@ -1305,7 +1939,7 @@ function renderRecordings(groups)
 
 	if (!groups || groups.length === 0) {
 		var emptyMessage = document.createElement('div');
-		emptyMessage.textContent = 'No WAV recordings found in /mnt/Media/recordings.';
+		emptyMessage.textContent = 'No WAV/MP3/OGG recordings found in /mnt/Media/recordings.';
 		recordingsList.appendChild(emptyMessage);
 		return;
 	}
@@ -1340,6 +1974,10 @@ function renderRecordings(groups)
 		durationHead.className = 'recording-duration';
 		durationHead.textContent = 'Duration';
 
+		var contentTypeHead = document.createElement('th');
+		contentTypeHead.className = 'recording-content-type';
+		contentTypeHead.textContent = 'Content-Type';
+
 		var sizeHead = document.createElement('th');
 		sizeHead.className = 'recording-size';
 		sizeHead.textContent = 'Size';
@@ -1351,6 +1989,7 @@ function renderRecordings(groups)
 		headRow.appendChild(dateHead);
 		headRow.appendChild(timeHead);
 		headRow.appendChild(nameHead);
+		headRow.appendChild(contentTypeHead);
 		headRow.appendChild(durationHead);
 		headRow.appendChild(sizeHead);
 		headRow.appendChild(downloadHead);
@@ -1387,6 +2026,10 @@ function renderRecordings(groups)
 			durationCell.className = 'recording-duration';
 			durationCell.textContent = recording.duration_display;
 
+			var contentTypeCell = document.createElement('td');
+			contentTypeCell.className = 'recording-content-type';
+			contentTypeCell.textContent = recording.content_type ? recording.content_type : 'audio/unknown';
+
 			var sizeCell = document.createElement('td');
 			sizeCell.className = 'recording-size';
 			sizeCell.textContent = recording.size_human;
@@ -1407,6 +2050,7 @@ function renderRecordings(groups)
 			row.appendChild(dateCell);
 			row.appendChild(timeCell);
 			row.appendChild(nameCell);
+			row.appendChild(contentTypeCell);
 			row.appendChild(durationCell);
 			row.appendChild(sizeCell);
 			row.appendChild(downloadCell);
@@ -1417,6 +2061,27 @@ function renderRecordings(groups)
 
 		recordingsList.appendChild(table);
 	}
+}
+
+function exportFilteredZip()
+{
+	var normalizedFilter = getRecordingNameFilterValue();
+	var dateRange = getDateRangeFilter();
+	var url = '?ajax=zip';
+
+	if (normalizedFilter !== '') {
+		url += '&filter=' + encodeURIComponent(normalizedFilter);
+	}
+
+	if (dateRange.startTs !== null) {
+		url += '&start=' + dateRange.startTs;
+	}
+
+	if (dateRange.endTs !== null) {
+		url += '&end=' + dateRange.endTs;
+	}
+
+	window.location.href = url;
 }
 
 function refreshRecordings(manualRefresh)
@@ -1474,9 +2139,10 @@ function refreshRecordings(manualRefresh)
 		allRecordingsGroups = response.groups;
 
 		var normalizedFilter = getRecordingNameFilterValue();
+		var dateRange = getDateRangeFilter();
 		var queuedMatchingCount = 0;
 		if (hasLoadedRecordingsOnce && isAutoPlayNewEnabled()) {
-			var newMatchingPaths = collectNewMatchingPaths(allRecordingsGroups, previousRecordingsByPath, normalizedFilter);
+			var newMatchingPaths = collectNewMatchingPaths(allRecordingsGroups, previousRecordingsByPath, normalizedFilter, dateRange);
 			queuedMatchingCount = queuePendingAutoPlayPaths(newMatchingPaths);
 		}
 
@@ -1490,7 +2156,8 @@ function refreshRecordings(manualRefresh)
 		var refreshedAt = new Date(response.generated_at * 1000).toLocaleTimeString();
 		var prefix = manualRefresh ? 'Refreshed. ' : '';
 		var statusText = prefix + response.count + ' recording(s) found';
-		if (normalizedFilter !== '') {
+		var isFiltered = normalizedFilter !== '' || (dateRange.startTs !== null || dateRange.endTs !== null);
+		if (isFiltered) {
 			statusText += ', ' + shownCount + ' shown';
 		}
 		statusText += '. Last refresh ' + refreshedAt + '.';
@@ -1516,9 +2183,35 @@ function startRecordingsPage()
 		filterInput.addEventListener('input', onFilterInputChanged);
 	}
 
+	var dateStartInput = document.getElementById('recordingsFilterStart');
+	if (dateStartInput) {
+		var oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+		var pad = function (n) { return String(n).padStart(2, '0'); };
+		dateStartInput.value = oneWeekAgo.getFullYear() + '-' + pad(oneWeekAgo.getMonth() + 1) + '-' + pad(oneWeekAgo.getDate()) + 'T' + pad(oneWeekAgo.getHours()) + ':' + pad(oneWeekAgo.getMinutes());
+		dateStartInput.addEventListener('change', onFilterInputChanged);
+	}
+
+	var dateEndInput = document.getElementById('recordingsFilterEnd');
+	if (dateEndInput) {
+		dateEndInput.addEventListener('change', onFilterInputChanged);
+	}
+
 	var autoPlayCheckbox = document.getElementById('autoPlayNewCheckbox');
 	if (autoPlayCheckbox) {
 		autoPlayCheckbox.addEventListener('change', onAutoPlayNewCheckboxChanged);
+	}
+
+	var keepPlayingCheckbox = document.getElementById('keepPlayingChronologicallyCheckbox');
+	if (keepPlayingCheckbox) {
+		keepPlayingCheckbox.addEventListener('change', function () {
+			if (!isKeepPlayingEnabled()) {
+				return;
+			}
+			// If nothing is selected yet, start from the oldest recording.
+			if (!selectedPath || !isAudioPlayerActivelyPlaying()) {
+				playNextChronological();
+			}
+		});
 	}
 
 	var audioPlayer = document.getElementById('audioPlayer');
