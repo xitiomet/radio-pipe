@@ -10,9 +10,6 @@ A recording will be created as follows:
 
 Regular builds can be found at [rms-cast-recorder downloads](https://openstatic.org/projects/rms-cast-recorder/#downloads) (scroll to the bottom)
 
-### Screenshot
-![](https://openstatic.org/projects/rms-cast-recorder/rms_screenshot.png)
-
 ### Optional PHP Interface
 ![](https://openstatic.org/projects/rms-cast-recorder/recordings_php.png)
 In the subdirectory php is a web interface for browsing and reviewing the recordings. All you need is a php capable web server.
@@ -26,9 +23,11 @@ $PAGE_TITLE = 'Icecast Stream Recordings';
 ```
 
 ## Usage
+Basic Usage example:
+![](https://openstatic.org/projects/rms-cast-recorder/rms_screenshot.png)
 
-Once the jar is built you can run the recorder against either a Shoutcast/Icecast stream URL or audio from stdin.
-Recordings are broken into WAV files whenever the stream goes silent and are placed in day‑based folders. At the top of the file you will see two variables, set these accordingly.
+You can run the recorder against either a Shoutcast/Icecast stream URL or audio from stdin.
+Recordings are broken into WAV files whenever the stream goes silent and are placed in day‑based folders.
 
 URL example:
 ```bash
@@ -38,6 +37,7 @@ $ ./rms-cast-recorder \
   -x /usr/local/bin/on-clip-written.sh \
   -r 8000 -c 1 -b 16
 ```
+on-clip-written.sh will run after the clip is produced, which will be passed (full path) as the first argument
 
 stdin example (`arecord`):
 ```bash
@@ -58,6 +58,58 @@ $ arecord -f S16_LE -c 1 -r 8000 -t raw - \
     --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
     -o ./recordings
 ```
+## Sample Scripts
+
+The `scripts/` directory contains helper scripts for converting recorded WAV files to compressed formats. All scripts require `exiftool` (`sudo apt install -y libimage-exiftool-perl`) to preserve the stream title and comment metadata during conversion.
+
+### `x-convert-mp3.sh` — Per-clip MP3 conversion (for `-x` / `--on-write`)
+
+Converts a single WAV file to MP3 and removes the original on success. Designed to be passed directly to the `-x` option so each clip is compressed immediately after it is written.
+
+Requires: `exiftool`, `lame` (`sudo apt install -y lame`)
+
+```bash
+$ ./rms-cast-recorder -u http://example.com:8000/stream.mp3 \
+      -o ./recordings \
+      -x ./scripts/x-convert-mp3.sh
+```
+
+### `x-convert-ogg.sh` — Per-clip OGG conversion (for `-x` / `--on-write`)
+
+Same as `x-convert-mp3.sh` but produces an Ogg Vorbis file instead of MP3.
+
+Requires: `exiftool`, `oggenc` (`sudo apt install -y vorbis-tools`)
+
+```bash
+$ ./rms-cast-recorder -u http://example.com:8000/stream.mp3 \
+      -o ./recordings \
+      -x ./scripts/x-convert-ogg.sh
+```
+
+### `bulk-compress-to-mp3.sh` — Batch WAV → MP3 conversion
+
+Walks a directory tree (passed as the first argument) and converts every WAV file it finds to MP3, removing the original after a successful conversion. Useful as a scheduled cron job to compress an existing archive of recordings.
+
+Requires: `exiftool`, `lame`
+
+```bash
+$ ./scripts/bulk-compress-to-mp3.sh ./recordings
+```
+
+### `bulk-compress-to-ogg.sh` — Batch WAV → OGG conversion
+
+Same as `bulk-compress-to-mp3.sh` but converts to Ogg Vorbis. Can also be run as a cron job.
+
+Requires: `exiftool`, `oggenc`
+
+```bash
+$ ./scripts/bulk-compress-to-ogg.sh ./recordings
+```
+
+## Metadata and Live Listen
+Inside the metadata of every file produced (ogg,wav,mp3) is a Comment field.
+In order for the Live Listen feature to work in the php interface, this field
+must contain "Source URL: http://xyz/abc.mp3" which will point to the original stream.
 
 ## Options
 
