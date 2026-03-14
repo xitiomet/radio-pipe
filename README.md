@@ -1,6 +1,10 @@
 ## RMSCastRecorder
 
-A tool for recording Ham Radio related shoutcast or icecast streams. This tool will listen to a shoutcast or icecast stream and only record when there is audio (root-mean-square activation) I found myself wishing i had an easy straightfoward way to record a stream without the long silences between transmissions. RMSCastRecorder will organize the produced wav files into folders by date, and the filename will include the stream title and timestamp.
+A tool for recording Ham/CB/GRMS Radio related shoutcast or icecast internet streams. This tool will listen to a stream and only record when there is audio (root-mean-square activation) it will also accept audio from stdin so you can pipe from your soundcard, maybe a digirig connected to a radio or another source.
+
+I found myself wishing i had an easy straightfoward way to record a stream without the long silences between transmissions. RMSCastRecorder will organize the produced wav files into folders by date, and the filename will include the stream title and timestamp.
+You can even run multiple instances pointed to the same output directory and as long as the stream names are different there should be
+no conflicts.
 
 Example output with -o ./recordings
 
@@ -12,7 +16,13 @@ Regular builds can be found at [rms-cast-recorder downloads](https://openstatic.
 
 ### Optional PHP Interface
 ![](https://openstatic.org/projects/rms-cast-recorder/recordings_php.png)
-In the subdirectory php is a web interface for browsing and reviewing the recordings. All you need is a php capable web server.
+In the subdirectory php of this project is a web interface for browsing and reviewing the recordings. 
+All you need is a php capable web server. The php requirements are:
+
+* php-zip
+* php-json
+
+The php page can be dropped anywhere or renamed, all you need to do is tell it where the recordings are.
 
 you can edit the index.php or create a config.php file with the following variables:
 ```php
@@ -21,6 +31,13 @@ $recordingsRoot = '/mnt/Media/recordings';
 $PAGE_TITLE = 'Icecast Stream Recordings';
 // End Settings
 ```
+If you are on windows and don't want to go through the hassle, ive put together an experimental stand-alone
+version for windows that uses a bunch of scripts to setup everything you need in "%APPDATA%"
+
+[recordings-browser Installer](https://openstatic.org/projects/rms-cast-recorder/recordings-browser.exe)
+You will probably get a lot of security warnings because its a 7zip sfx.
+
+There is no uninstall, but you can right-click on the shortcut to open its location, its all one folder, easy to delete.
 
 ## Usage
 Basic Usage example:
