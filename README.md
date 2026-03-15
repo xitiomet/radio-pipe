@@ -123,6 +123,41 @@ Requires: `exiftool`, `oggenc`
 $ ./scripts/bulk-compress-to-ogg.sh ./recordings
 ```
 
+### `rtl-fm-record.sh` — RTL-SDR capture helper
+
+Runs `rtl_fm` and pipes raw PCM into `rms-cast-recorder` using `--stdin --stdin-raw`.
+The script sets stream names as `RTLSDR - (<frequency>)`, so each tuned frequency
+is clearly labeled in output filenames and metadata.
+
+Requires:
+
+* `rtl_fm` (from `rtl-sdr`) (`sudo apt install -y rtl-sdr`)
+* `rms-cast-recorder` binary in `PATH` or pass `-e <path>`
+
+Common examples:
+
+```bash
+$ ./scripts/rtl-fm-record.sh -f 146.520M -q 20 -o ./recordings
+```
+
+```bash
+$ ./scripts/rtl-fm-record.sh -f 462.550M -q 25 -R 12000 -o ./recordings
+```
+
+Script options:
+
+* `-f,--frequency <freq>` – required frequency to tune
+* `-q,--squelch <level>` – rtl_fm squelch level (default 0)
+* `-R,--sample-rate <hz>` – sample rate for both rtl_fm and recorder (default 8000)
+* `-o,--out <dir>` – output recordings directory (default `./recordings`)
+* `-e,--exec <path>` – path/name of rms-cast-recorder executable
+* `-m,--mode <mode>` – rtl_fm mode (default `fm`)
+* `-d,--device <index>` – rtl_fm device index
+* `-g,--gain <gain>` – rtl_fm gain value
+* `-t,--threshold <db>` – recorder silence threshold dB (default `-50`)
+* `-s,--silence <seconds>` – recorder silence duration in seconds (default `2`)
+* `-x,--on-write <program>` – recorder on-write hook
+
 ## Metadata and Live Listen
 Inside the metadata of every file produced (ogg,wav,mp3) is a Comment field.
 In order for the Live Listen feature to work in the php interface, this field
