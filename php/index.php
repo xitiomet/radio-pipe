@@ -2,14 +2,384 @@
 
 // Settings
 $recordingsRoot = '/opt/recordings/';
-$PAGE_TITLE = 'Icecast Stream Recordings';
+$PAGE_TITLE = 'Radio Stream Recordings';
 $supportedRecordingExtensions = array('wav', 'mp3', 'ogg');
+$authenticate = FALSE; // Set to true to enable basic authentication for access control.
+$authenticationDebug = FALSE; // Set to true to write authentication decisions to PHP error_log.
+$authenticationSessionLifetimeSeconds = 315360000; // 10 years; effectively non-expiring unless server/browser clears cookies.
+
+// Configure one or more login accounts for accessing recordings.
+// Preferred format:
+// $ACCOUNTS = array(
+// 	array('username' => 'root', 'password' => 'password1'),
+// 	array('username' => 'admin', 'hashedPassword' => '$6$salt$hash...'),
+// );
 
 if (file_exists(__DIR__ . '/config.php')) {
 	include __DIR__ . '/config.php';
 }
 
 // End Settings
+
+
+function recordingsAuthDebugEnabled(): bool
+{
+	global $authenticationDebug;
+	return isset($authenticationDebug) && $authenticationDebug === true;
+}
+
+function recordingsAuthDebugLog(string $message, array $context = array()): void
+{
+	if (!recordingsAuthDebugEnabled()) {
+		return;
+	}
+
+	$safeContext = array();
+	foreach ($context as $key => $value) {
+		if (is_bool($value) || is_int($value) || is_float($value) || $value === null) {
+			$safeContext[$key] = $value;
+			continue;
+		}
+
+		if (is_string($value)) {
+			$safeContext[$key] = (strlen($value) > 180) ? (substr($value, 0, 177) . '...') : $value;
+			continue;
+		}
+
+		if (is_array($value)) {
+			$safeContext[$key] = 'array(' . count($value) . ')';
+			continue;
+		}
+
+		$safeContext[$key] = gettype($value);
+	}
+
+	$contextJson = json_encode($safeContext);
+	if ($contextJson === false) {
+		$contextJson = '{}';
+	}
+
+	error_log('[recordings-auth] ' . $message . ' ' . $contextJson);
+}
+
+
+function startRecordingsAuthSession(): void
+{
+	if (session_status() !== PHP_SESSION_ACTIVE) {
+		global $authenticationSessionLifetimeSeconds;
+		$sessionLifetime = (int)$authenticationSessionLifetimeSeconds;
+		if ($sessionLifetime < 0) {
+			$sessionLifetime = 0;
+		}
+
+		@ini_set('session.gc_maxlifetime', (string)$sessionLifetime);
+
+		$useSecureCookie = (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off');
+		if (PHP_VERSION_ID >= 70300) {
+			session_set_cookie_params(array(
+				'lifetime' => $sessionLifetime,
+				'path' => '/',
+				'domain' => '',
+				'secure' => $useSecureCookie,
+				'httponly' => true,
+				'samesite' => 'Lax',
+			));
+		} else {
+			session_set_cookie_params($sessionLifetime, '/; samesite=Lax', '', $useSecureCookie, true);
+		}
+
+		session_start();
+	}
+}
+
+function normalizeConfiguredPasswordHash(string $rawHash): string
+{
+	$rawHash = trim($rawHash);
+	if ($rawHash === '') {
+		return '';
+	}
+
+	// Allow pasting a full /etc/shadow field; keep only the hash component.
+	$hashParts = explode(':', $rawHash, 2);
+	$normalizedHash = trim($hashParts[0]);
+	if ($normalizedHash === '' || $normalizedHash === 'x' || $normalizedHash === '*' || $normalizedHash === '!' || strpos($normalizedHash, '!') === 0) {
+		return '';
+	}
+
+	return $normalizedHash;
+}
+
+function verifyPasswordAgainstConfiguredHash(string $password, string $storedHash): bool
+{
+	$storedHash = normalizeConfiguredPasswordHash($storedHash);
+	if ($storedHash === '' || $password === '') {
+		return false;
+	}
+
+	$computedHash = crypt($password, $storedHash);
+	if (!is_string($computedHash) || $computedHash === '') {
+		return false;
+	}
+
+	if (function_exists('hash_equals')) {
+		return hash_equals($storedHash, $computedHash);
+	}
+
+	return $storedHash === $computedHash;
+}
+
+function getConfiguredRecordingsAccounts(): array
+{
+	global $ACCOUNTS, $USERNAME, $PASSWORD;
+
+	$configuredAccounts = array();
+
+	if (isset($ACCOUNTS) && is_array($ACCOUNTS)) {
+		foreach ($ACCOUNTS as $accountEntry) {
+			if (!is_array($accountEntry)) {
+				continue;
+			}
+
+			if (!isset($accountEntry['username'])) {
+				continue;
+			}
+
+			if (!is_string($accountEntry['username'])) {
+				continue;
+			}
+
+			$entryUsername = trim($accountEntry['username']);
+			if ($entryUsername === '') {
+				continue;
+			}
+
+			$normalizedAccount = array('username' => $entryUsername);
+
+			if (isset($accountEntry['password']) && is_string($accountEntry['password']) && $accountEntry['password'] !== '') {
+				$normalizedAccount['password'] = (string)$accountEntry['password'];
+			}
+
+			if (isset($accountEntry['hashedPassword']) && is_string($accountEntry['hashedPassword'])) {
+				$normalizedHash = normalizeConfiguredPasswordHash((string)$accountEntry['hashedPassword']);
+				if ($normalizedHash !== '') {
+					$normalizedAccount['hashedPassword'] = $normalizedHash;
+				}
+			}
+
+			if (!isset($normalizedAccount['password']) && !isset($normalizedAccount['hashedPassword'])) {
+				continue;
+			}
+
+			$configuredAccounts[] = $normalizedAccount;
+		}
+	}
+
+	if (isset($USERNAME, $PASSWORD) && is_string($USERNAME) && is_string($PASSWORD)) {
+		$legacyUsername = trim($USERNAME);
+		$legacyPassword = (string)$PASSWORD;
+		if ($legacyUsername !== '' && $legacyPassword !== '') {
+			$configuredAccounts[] = array(
+				'username' => $legacyUsername,
+				'password' => $legacyPassword,
+			);
+		}
+	}
+
+	return $configuredAccounts;
+}
+
+function verifyRecordingsLogin(string $username, string $password): bool
+{
+	$configuredAccounts = getConfiguredRecordingsAccounts();
+	if (count($configuredAccounts) === 0) {
+		recordingsAuthDebugLog('Configured credentials are missing; login attempt denied.', array('username' => $username));
+		return false;
+	}
+
+	$matchFound = false;
+	foreach ($configuredAccounts as $configuredAccount) {
+		if (!hash_equals((string)$configuredAccount['username'], $username)) {
+			continue;
+		}
+
+		if (isset($configuredAccount['password']) && hash_equals((string)$configuredAccount['password'], $password)) {
+			$matchFound = true;
+			break;
+		}
+
+		if (isset($configuredAccount['hashedPassword']) && verifyPasswordAgainstConfiguredHash($password, (string)$configuredAccount['hashedPassword'])) {
+			$matchFound = true;
+			break;
+		}
+	}
+
+	recordingsAuthDebugLog('Configured credential verification completed.', array(
+		'username' => $username,
+		'success' => $matchFound,
+		'configured_count' => count($configuredAccounts),
+	));
+	return $matchFound;
+}
+
+function recordingsAuthIsLoggedIn(): bool
+{
+	return isset($_SESSION['recordings_auth_logged_in'], $_SESSION['recordings_auth_username'])
+		&& $_SESSION['recordings_auth_logged_in'] === true
+		&& is_string($_SESSION['recordings_auth_username'])
+		&& $_SESSION['recordings_auth_username'] !== '';
+}
+
+function getRecordingsAuthenticatedUsername(): string
+{
+	if (!recordingsAuthIsLoggedIn()) {
+		return '';
+	}
+
+	return (string)$_SESSION['recordings_auth_username'];
+}
+
+function setRecordingsAuthenticatedUser(string $username): void
+{
+	session_regenerate_id(true);
+	$_SESSION['recordings_auth_logged_in'] = true;
+	$_SESSION['recordings_auth_username'] = $username;
+	$_SESSION['recordings_auth_logged_in_at'] = time();
+}
+
+function clearRecordingsAuthenticatedUser(): void
+{
+	unset($_SESSION['recordings_auth_logged_in']);
+	unset($_SESSION['recordings_auth_username']);
+	unset($_SESSION['recordings_auth_logged_in_at']);
+	if (session_status() === PHP_SESSION_ACTIVE) {
+		session_regenerate_id(true);
+	}
+}
+
+function getRecordingsRequestPath(): string
+{
+	$requestUri = isset($_SERVER['REQUEST_URI']) ? (string)$_SERVER['REQUEST_URI'] : '';
+	$path = parse_url($requestUri, PHP_URL_PATH);
+	if (!is_string($path) || $path === '') {
+		$scriptName = isset($_SERVER['SCRIPT_NAME']) ? (string)$_SERVER['SCRIPT_NAME'] : '';
+		return $scriptName !== '' ? $scriptName : 'index.php';
+	}
+
+	return $path;
+}
+
+function respondToUnauthenticatedRecordingsRequest(string $ajaxAction): void
+{
+	if ($ajaxAction === 'list' || $ajaxAction === 'zip') {
+		sendJsonResponse(array(
+			'ok' => false,
+			'error' => 'Authentication required.',
+		), 401);
+	}
+
+	http_response_code(401);
+	header('Content-Type: text/plain; charset=utf-8');
+	header('Cache-Control: no-cache, no-store, must-revalidate');
+	echo 'Authentication required.';
+	exit;
+}
+
+function renderRecordingsLoginPage(string $pageTitle, string $errorMessage = ''): void
+{
+	$safeTitle = htmlspecialchars($pageTitle, ENT_QUOTES, 'UTF-8');
+	$safeErrorMessage = htmlspecialchars($errorMessage, ENT_QUOTES, 'UTF-8');
+	$actionPath = htmlspecialchars(getRecordingsRequestPath(), ENT_QUOTES, 'UTF-8');
+	$hasConfiguredCredentials = (count(getConfiguredRecordingsAccounts()) > 0);
+	$helperText = $hasConfiguredCredentials
+		? 'Sign in with the configured recordings credentials.'
+		: 'Login is disabled until ACCOUNTS (or USERNAME and PASSWORD) are configured.';
+
+	http_response_code($errorMessage !== '' ? 401 : 200);
+	echo '<!DOCTYPE html>';
+	echo '<html><head>';
+	echo '<title>' . $safeTitle . ' Login</title>';
+	echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
+	echo '<style type="text/css">';
+	echo 'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,#0f1419,#1e2b36);color:#e7edf3;font-family:Arial,Helvetica,sans-serif;padding:16px;box-sizing:border-box;}';
+	echo '.login-card{width:100%;max-width:420px;background:#182129;border:1px solid #31414f;border-radius:12px;padding:24px;box-shadow:0 18px 48px rgba(0,0,0,0.35);}';
+	echo '.login-card h1{margin:0 0 8px;font-size:24px;}';
+	echo '.login-card p{margin:0 0 18px;color:#b8c7d6;line-height:1.5;}';
+	echo '.login-error{margin:0 0 16px;padding:10px 12px;border:1px solid #8a2b2b;border-radius:8px;background:#4a1d1d;color:#ffd8d8;}';
+	echo '.login-field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px;}';
+	echo '.login-field label{font-size:13px;font-weight:bold;color:#d8e4ef;}';
+	echo '.login-field input{min-height:42px;padding:10px 12px;border:1px solid #435363;border-radius:8px;background:#0f151a;color:#f2f7fb;font-size:14px;box-sizing:border-box;}';
+	echo '.login-submit{width:100%;min-height:42px;border:1px solid #5b88b8;border-radius:8px;background:#2b5f96;color:#ffffff;font-size:15px;font-weight:bold;cursor:pointer;}';
+	echo '.login-submit:hover{background:#3471b1;}';
+	echo '</style></head><body>';
+	echo '<form class="login-card" method="post" action="' . $actionPath . '">';
+	echo '<h1>' . $safeTitle . '</h1>';
+	//echo '<p>' . htmlspecialchars($helperText, ENT_QUOTES, 'UTF-8') . '</p>';
+	if ($safeErrorMessage !== '') {
+		echo '<div class="login-error">' . $safeErrorMessage . '</div>';
+	}
+	echo '<div class="login-field"><label for="login_username">Username</label><input type="text" id="login_username" name="login_username" autocomplete="username" required></div>';
+	echo '<div class="login-field"><label for="login_password">Password</label><input type="password" id="login_password" name="login_password" autocomplete="current-password" required></div>';
+	echo '<button type="submit" class="login-submit">Sign In</button>';
+	echo '</form></body></html>';
+	exit;
+}
+
+function enforceRecordingsAuthentication(bool $authenticateEnabled, string $pageTitle, string $ajaxAction): void
+{
+	if ($authenticateEnabled !== true) {
+		return;
+	}
+
+	recordingsAuthDebugLog('Authentication enforcement active.', array(
+		'ajax_action' => $ajaxAction,
+		'method' => isset($_SERVER['REQUEST_METHOD']) ? (string)$_SERVER['REQUEST_METHOD'] : '',
+		'uri' => isset($_SERVER['REQUEST_URI']) ? (string)$_SERVER['REQUEST_URI'] : '',
+		'remote_addr' => isset($_SERVER['REMOTE_ADDR']) ? (string)$_SERVER['REMOTE_ADDR'] : '',
+	));
+
+	startRecordingsAuthSession();
+
+	if (isset($_GET['logout']) && (string)$_GET['logout'] === '1') {
+		recordingsAuthDebugLog('Logout requested.', array('username' => getRecordingsAuthenticatedUsername()));
+		clearRecordingsAuthenticatedUser();
+		renderRecordingsLoginPage($pageTitle);
+	}
+
+	if (recordingsAuthIsLoggedIn()) {
+		recordingsAuthDebugLog('Session already authenticated.', array('username' => getRecordingsAuthenticatedUsername()));
+		return;
+	}
+
+	$loginError = '';
+	if (
+		isset($_SERVER['REQUEST_METHOD'])
+		&& strtoupper((string)$_SERVER['REQUEST_METHOD']) === 'POST'
+		&& isset($_POST['login_username'], $_POST['login_password'])
+	) {
+		$username = trim((string)$_POST['login_username']);
+		$password = (string)$_POST['login_password'];
+		recordingsAuthDebugLog('Login form submitted.', array('username' => $username));
+
+		if (verifyRecordingsLogin($username, $password)) {
+			recordingsAuthDebugLog('Login successful.', array('username' => $username));
+			setRecordingsAuthenticatedUser($username);
+			header('Location: ' . getRecordingsRequestPath());
+			exit;
+		}
+
+		recordingsAuthDebugLog('Login failed.', array('username' => $username));
+		$loginError = (count(getConfiguredRecordingsAccounts()) === 0)
+			? 'Server credentials are not configured. Set ACCOUNTS (or USERNAME and PASSWORD) first.'
+			: 'Invalid username or password.';
+	}
+
+	if ($ajaxAction !== '') {
+		recordingsAuthDebugLog('Blocking unauthenticated ajax request.', array('ajax_action' => $ajaxAction));
+		respondToUnauthenticatedRecordingsRequest($ajaxAction);
+	}
+
+	renderRecordingsLoginPage($pageTitle, $loginError);
+}
 
 
 function sendJsonResponse(array $payload, int $statusCode = 200): void
@@ -1469,6 +1839,7 @@ function streamLiveSourceForRecording(string $rootDirectory, array $allowedExten
 }
 
 $ajaxAction = isset($_GET['ajax']) ? (string)$_GET['ajax'] : '';
+enforceRecordingsAuthentication($authenticate === true, $PAGE_TITLE, $ajaxAction);
 if (
 	($ajaxAction === 'stream' || $ajaxAction === 'live_proxy')
 	&& isset($_SERVER['REQUEST_METHOD'])
@@ -1717,12 +2088,14 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 	}
 
 	.recordings-list-wrap {
+		--recording-date-sticky-offset: 0px;
+		--recording-table-sticky-offset: 34px;
 		height: 420px;
 		min-height: 220px;
 		overflow-x: auto;
 		overflow-y: auto;
 		-webkit-overflow-scrolling: touch;
-		padding: 8px;
+		padding: 0;
 		background-color: #171717;
 	}
 
@@ -1731,9 +2104,11 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 	}
 
 	.recording-date {
-		margin-top: 8px;
-		margin-bottom: 4px;
+		margin: 0;
 		padding: 4px 8px;
+		position: sticky;
+		top: var(--recording-date-sticky-offset);
+		z-index: 5;
 		background-color: #2a2a2a;
 		color: #f2f2f2;
 		border-radius: 4px;
@@ -1753,6 +2128,10 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 		margin-bottom: 8px;
 	}
 
+	.recording-date + .recording-table {
+		margin-top: 0;
+	}
+
 	.recording-table th {
 		border-bottom: 1px solid #434343;
 		padding: 5px 6px;
@@ -1770,7 +2149,7 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 
 	.recording-table thead th {
 		position: sticky;
-		top: 0;
+		top: var(--recording-table-sticky-offset);
 		z-index: 4;
 	}
 
@@ -2424,7 +2803,7 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 		}
 
 		.recordings-list-wrap {
-			padding: 6px;
+			padding: 0px;
 		}
 
 		.recording-table th {
@@ -2519,6 +2898,9 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 
 <h2><?=$PAGE_TITLE?></h2>
 <div class="status-row">
+	<?php if ($authenticate === true) { ?>
+		<a class="refresh-button" style="min-height: 20px; max-height: 20px;" href="?logout=1" style="text-decoration: none;">Logout<?=getRecordingsAuthenticatedUsername() !== '' ? ' (' . htmlspecialchars(getRecordingsAuthenticatedUsername(), ENT_QUOTES, 'UTF-8') . ')' : ''?></a>
+	<?php } ?>
 	<span id="statusText" class="status-text">Loading recordings...</span>
 </div>
 
@@ -2705,9 +3087,12 @@ function toggleFiltersVisibility()
 
 function initFiltersVisibility()
 {
-	var collapsed = false;
+	var collapsed = true;
 	try {
-		collapsed = window.localStorage.getItem('recordingsFiltersCollapsed') === '1';
+		var storedPreference = window.localStorage.getItem('recordingsFiltersCollapsed');
+		if (storedPreference === '0' || storedPreference === '1') {
+			collapsed = (storedPreference === '1');
+		}
 	} catch (error) {
 	}
 
@@ -2723,7 +3108,7 @@ function adjustRecordingsListHeight()
 
 	var rect = recordingsListWrap.getBoundingClientRect();
 	var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-	var bottomPadding = 32;
+	var bottomPadding = 18;
 	var availableHeight = viewportHeight - rect.top - bottomPadding;
 	var minHeight = 220;
 
@@ -2732,6 +3117,26 @@ function adjustRecordingsListHeight()
 	}
 
 	recordingsListWrap.style.height = Math.floor(availableHeight) + 'px';
+	updateRecordingsStickyOffsets();
+}
+
+function updateRecordingsStickyOffsets()
+{
+	var recordingsListWrap = document.getElementById('recordingsList');
+	if (!recordingsListWrap) {
+		return;
+	}
+
+	var stickyTableOffset = 0;
+	var firstDateHeader = recordingsListWrap.querySelector('.recording-date');
+	if (firstDateHeader) {
+		stickyTableOffset = firstDateHeader.offsetHeight;
+		var dateHeaderStyles = window.getComputedStyle(firstDateHeader);
+		stickyTableOffset += parseFloat(dateHeaderStyles.marginBottom) || 0;
+	}
+
+	recordingsListWrap.style.setProperty('--recording-date-sticky-offset', '0px');
+	recordingsListWrap.style.setProperty('--recording-table-sticky-offset', Math.max(0, Math.ceil(stickyTableOffset)) + 'px');
 }
 
 function formatBytesForStatus(bytes)
@@ -3976,6 +4381,7 @@ function renderRecordings(groups)
 		var emptyMessage = document.createElement('div');
 		emptyMessage.textContent = 'No WAV/MP3/OGG recordings found.';
 		recordingsList.appendChild(emptyMessage);
+		updateRecordingsStickyOffsets();
 		return;
 	}
 
@@ -4117,6 +4523,7 @@ function renderRecordings(groups)
 
 	previousWeekWrap.appendChild(previousWeekButton);
 	recordingsList.appendChild(previousWeekWrap);
+	updateRecordingsStickyOffsets();
 }
 
 function exportFilteredZip()
