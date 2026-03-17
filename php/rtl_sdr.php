@@ -1727,6 +1727,15 @@ function rtl_sdr_stream_proxy(string $serversFile, string $target, string $mount
 		exit;
 	}
 
+	// Release the session file lock before entering the long-running stream loop.
+	// session_start() acquires a write lock on the session file; without closing it
+	// here, every other request sharing the same session cookie would block until
+	// the stream ends (which may never happen). All session reads needed for auth
+	// have already completed by this point.
+	if (session_status() === PHP_SESSION_ACTIVE) {
+		session_write_close();
+	}
+
 	$streamUrl = 'http://' . $target . $mount;
 
 	$requestHeaders = array(
