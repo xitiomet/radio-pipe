@@ -288,6 +288,7 @@ function default_ui_settings(): array
 {
 	return array(
 		'deviceConfigs' => array(),
+		'antennaDescriptionsBySerial' => array(),
 	);
 }
 
@@ -304,6 +305,31 @@ function normalize_templates(array $rawTemplates): array
 	}
 
 	return $templates;
+}
+
+function normalize_antenna_descriptions_by_serial(array $rawDescriptions): array
+{
+	$normalized = array();
+	foreach ($rawDescriptions as $rawSerial => $rawDescription) {
+		$serial = normalize_device_serial((string)$rawSerial);
+		if ($serial === '') {
+			continue;
+		}
+
+		$description = trim((string)$rawDescription);
+		if ($description === '') {
+			continue;
+		}
+
+		$description = trim(preg_replace('/\s+/', ' ', $description) ?? $description);
+		if ($description === '') {
+			continue;
+		}
+
+		$normalized[$serial] = $description;
+	}
+
+	return $normalized;
 }
 
 function normalize_ui_settings(array $rawSettings): array
@@ -324,6 +350,11 @@ function normalize_ui_settings(array $rawSettings): array
 		$deviceConfigs[$normalizedDeviceId] = $config;
 	}
 	$normalized['deviceConfigs'] = $deviceConfigs;
+
+	$rawAntennaDescriptions = isset($rawSettings['antennaDescriptionsBySerial']) && is_array($rawSettings['antennaDescriptionsBySerial'])
+		? $rawSettings['antennaDescriptionsBySerial']
+		: array();
+	$normalized['antennaDescriptionsBySerial'] = normalize_antenna_descriptions_by_serial($rawAntennaDescriptions);
 
 	return $normalized;
 }
@@ -354,6 +385,7 @@ function save_ui_settings(string $filePath, array $settings): bool
 	$normalized = normalize_ui_settings($settings);
 	$toPersist = $normalized;
 	$toPersist['deviceConfigs'] = (object)$normalized['deviceConfigs'];
+	$toPersist['antennaDescriptionsBySerial'] = (object)$normalized['antennaDescriptionsBySerial'];
 	$encoded = json_encode($toPersist, JSON_PRETTY_PRINT);
 	if (!is_string($encoded)) {
 		return false;
@@ -463,6 +495,7 @@ function ui_settings_for_response(array $settings): array
 {
 	return array(
 		'deviceConfigs' => (object)($settings['deviceConfigs'] ?? array()),
+		'antennaDescriptionsBySerial' => (object)($settings['antennaDescriptionsBySerial'] ?? array()),
 	);
 }
 
@@ -2020,6 +2053,16 @@ if ($action !== '') {
 		$incomingDeviceConfigs = isset($normalizedIncoming['deviceConfigs']) && is_array($normalizedIncoming['deviceConfigs'])
 			? $normalizedIncoming['deviceConfigs']
 			: array();
+		$incomingAntennaDescriptions = isset($normalizedIncoming['antennaDescriptionsBySerial']) && is_array($normalizedIncoming['antennaDescriptionsBySerial'])
+			? $normalizedIncoming['antennaDescriptionsBySerial']
+			: array();
+
+		$antennaDescriptions = isset($existingSettings['antennaDescriptionsBySerial']) && is_array($existingSettings['antennaDescriptionsBySerial'])
+			? $existingSettings['antennaDescriptionsBySerial']
+			: array();
+		if (isset($incoming['antennaDescriptionsBySerial']) && is_array($incoming['antennaDescriptionsBySerial'])) {
+			$antennaDescriptions = $incomingAntennaDescriptions;
+		}
 
 		$deviceDeletes = normalize_device_id_list($incoming['deviceConfigDeletes'] ?? array());
 		foreach ($deviceDeletes as $deleteDeviceId) {
@@ -2037,6 +2080,7 @@ if ($action !== '') {
 
 		$settings = $existingSettings;
 		$settings['deviceConfigs'] = merge_running_state_into_device_configs($currentDeviceConfigs, $state);
+		$settings['antennaDescriptionsBySerial'] = $antennaDescriptions;
 		if (!save_ui_settings($UI_SETTINGS_FILE, $settings)) {
 			send_json(array('ok' => false, 'error' => 'Failed to save UI settings.'), 500);
 		}
@@ -2301,6 +2345,7 @@ if ($action !== '') {
 			cursor: pointer;
 			transition: transform 120ms ease, background-color 120ms ease, border-color 120ms ease;
 		}
+		.refresh-button.compact { min-height: 24px; padding: 2px 9px; font-size: 10px; }
 		.refresh-button:hover { transform: translateY(-1px); border-color: var(--accent); }
 		.refresh-button.primary { background: var(--accent); color: #17120a; border-color: var(--accent); font-weight: 700; }
 		.refresh-button.danger { border-color: rgba(241, 143, 143, 0.45); }
@@ -2331,6 +2376,8 @@ if ($action !== '') {
 		.device-title { margin: 0; font-size: 20px; }
 		.device-stream-name { grid-column: 1 / -1; margin: 0; color: var(--accent); font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.device-subtitle { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+		.device-antenna-row { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+		.device-antenna-label { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.state-pill {
 			display: inline-flex;
 			align-items: center;
@@ -2490,6 +2537,28 @@ if ($action !== '') {
 			</div>
 		</div>
 	</div>
+
+	<div id="antennaModal" class="modal hidden">
+		<div class="modal-content">
+			<div class="modal-header">
+				<h3 id="antennaModalTitle">Edit Antenna Description</h3>
+				<button type="button" class="modal-close" id="antennaModalClose">&times;</button>
+			</div>
+			<div class="modal-body">
+				<div class="form-row single">
+					<div><label>Device</label><input type="text" id="antennaModalDevice" readonly></div>
+				</div>
+				<div class="form-row single">
+					<div><label>Antenna Description</label><input type="text" id="antennaModalDescription" placeholder="Optional antenna notes"></div>
+				</div>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="refresh-button" id="antennaModalCancel">Cancel</button>
+				<button type="button" class="refresh-button danger hidden" id="antennaModalClear">Clear</button>
+				<button type="button" class="refresh-button primary" id="antennaModalSave">Save</button>
+			</div>
+		</div>
+	</div>
 </div>
 
 <script type="text/javascript">
@@ -2497,6 +2566,7 @@ var apiUrl = window.location.pathname;
 var knownInstancesByDevice = {};
 var knownDetectedDevices = [];
 var deviceConfigsById = {};
+var antennaDescriptionsBySerial = {};
 var settingsTemplates = {};
 var streamServersById = {};
 var recordingServersById = {};
@@ -2511,6 +2581,8 @@ var UI_SETTINGS_SAVE_DELAY_MS = 400;
 var pendingDeviceConfigUpsertsById = {};
 var pendingDeviceConfigDeletesById = {};
 var lastSavedDeviceConfigFingerprintById = {};
+var pendingAntennaDescriptionsDirty = false;
+var lastSavedAntennaDescriptionsFingerprint = '';
 var templatesSaveInFlight = false;
 var templatesSaveQueued = false;
 var lastSavedTemplatesFingerprint = '';
@@ -2572,9 +2644,18 @@ function collectUiSettingsPayload()
 		upserts[deviceId] = pendingDeviceConfigUpsertsById[deviceId];
 	}
 
+	var antennaBySerial = {};
+	for (var serial in antennaDescriptionsBySerial) {
+		if (!Object.prototype.hasOwnProperty.call(antennaDescriptionsBySerial, serial)) {
+			continue;
+		}
+		antennaBySerial[String(serial)] = String(antennaDescriptionsBySerial[serial]);
+	}
+
 	return {
 		deviceConfigs: upserts,
-		deviceConfigDeletes: Object.keys(pendingDeviceConfigDeletesById)
+		deviceConfigDeletes: Object.keys(pendingDeviceConfigDeletesById),
+		antennaDescriptionsBySerial: antennaBySerial
 	};
 }
 
@@ -2703,7 +2784,12 @@ function saveUiSettingsNow()
 	var settingsPayload = collectUiSettingsPayload();
 	var upsertIds = Object.keys(settingsPayload.deviceConfigs || {});
 	var deleteIds = Array.isArray(settingsPayload.deviceConfigDeletes) ? settingsPayload.deviceConfigDeletes.slice() : [];
-	if (!upsertIds.length && !deleteIds.length) {
+	var antennaDescriptionsToSend = (settingsPayload.antennaDescriptionsBySerial && typeof settingsPayload.antennaDescriptionsBySerial === 'object' && !Array.isArray(settingsPayload.antennaDescriptionsBySerial))
+		? settingsPayload.antennaDescriptionsBySerial
+		: {};
+	var antennaFingerprint = computeUiSettingsFingerprint(antennaDescriptionsToSend);
+	var antennaDirty = pendingAntennaDescriptionsDirty || antennaFingerprint !== lastSavedAntennaDescriptionsFingerprint;
+	if (!upsertIds.length && !deleteIds.length && !antennaDirty) {
 		return Promise.resolve();
 	}
 
@@ -2721,24 +2807,31 @@ function saveUiSettingsNow()
 	return postUserAction('settings_set', {
 		settings: {
 			deviceConfigs: upsertsToSend,
-			deviceConfigDeletes: deleteIds
+			deviceConfigDeletes: deleteIds,
+			antennaDescriptionsBySerial: antennaDescriptionsToSend
 		}
 	}).then(function (result) {
-		if (result && result.settings && typeof result.settings === 'object') {
-			if (result.settings.deviceConfigs && typeof result.settings.deviceConfigs === 'object' && !Array.isArray(result.settings.deviceConfigs)) {
-				deviceConfigsById = result.settings.deviceConfigs;
-				rebuildLastSavedDeviceConfigFingerprints(deviceConfigsById);
-				return;
+		var responseSettings = (result && result.settings && typeof result.settings === 'object') ? result.settings : null;
+		if (responseSettings && responseSettings.deviceConfigs && typeof responseSettings.deviceConfigs === 'object' && !Array.isArray(responseSettings.deviceConfigs)) {
+			deviceConfigsById = responseSettings.deviceConfigs;
+			rebuildLastSavedDeviceConfigFingerprints(deviceConfigsById);
+		} else {
+			for (var k = 0; k < upsertIds.length; k++) {
+				var savedUpsertId = upsertIds[k];
+				lastSavedDeviceConfigFingerprintById[savedUpsertId] = computeDeviceConfigFingerprint(upsertsToSend[savedUpsertId]);
+			}
+			for (var m = 0; m < deleteIds.length; m++) {
+				delete lastSavedDeviceConfigFingerprintById[deleteIds[m]];
 			}
 		}
 
-		for (var k = 0; k < upsertIds.length; k++) {
-			var savedUpsertId = upsertIds[k];
-			lastSavedDeviceConfigFingerprintById[savedUpsertId] = computeDeviceConfigFingerprint(upsertsToSend[savedUpsertId]);
+		if (responseSettings && responseSettings.antennaDescriptionsBySerial && typeof responseSettings.antennaDescriptionsBySerial === 'object' && !Array.isArray(responseSettings.antennaDescriptionsBySerial)) {
+			antennaDescriptionsBySerial = responseSettings.antennaDescriptionsBySerial;
+		} else {
+			antennaDescriptionsBySerial = antennaDescriptionsToSend;
 		}
-		for (var m = 0; m < deleteIds.length; m++) {
-			delete lastSavedDeviceConfigFingerprintById[deleteIds[m]];
-		}
+		lastSavedAntennaDescriptionsFingerprint = computeUiSettingsFingerprint(antennaDescriptionsBySerial);
+		pendingAntennaDescriptionsDirty = false;
 	}).catch(function (error) {
 		setStatus('Failed to save UI settings: ' + error.message, true);
 		for (var n = 0; n < upsertIds.length; n++) {
@@ -2758,6 +2851,9 @@ function saveUiSettingsNow()
 			) {
 				pendingDeviceConfigDeletesById[retryDeleteId] = true;
 			}
+		}
+		if (antennaDirty) {
+			pendingAntennaDescriptionsDirty = true;
 		}
 	}).finally(function () {
 		uiSettingsSaveInFlight = false;
@@ -2789,14 +2885,24 @@ function loadUiSettingsFromServer()
 		} else {
 			deviceConfigsById = {};
 		}
+		if (settings.antennaDescriptionsBySerial && typeof settings.antennaDescriptionsBySerial === 'object' && !Array.isArray(settings.antennaDescriptionsBySerial)) {
+			antennaDescriptionsBySerial = settings.antennaDescriptionsBySerial;
+		} else {
+			antennaDescriptionsBySerial = {};
+		}
 		pendingDeviceConfigUpsertsById = {};
 		pendingDeviceConfigDeletesById = {};
+		pendingAntennaDescriptionsDirty = false;
 		rebuildLastSavedDeviceConfigFingerprints(deviceConfigsById);
+		lastSavedAntennaDescriptionsFingerprint = computeUiSettingsFingerprint(antennaDescriptionsBySerial);
 	}).catch(function () {
 		deviceConfigsById = {};
+		antennaDescriptionsBySerial = {};
 		pendingDeviceConfigUpsertsById = {};
 		pendingDeviceConfigDeletesById = {};
+		pendingAntennaDescriptionsDirty = false;
 		rebuildLastSavedDeviceConfigFingerprints(deviceConfigsById);
+		lastSavedAntennaDescriptionsFingerprint = computeUiSettingsFingerprint(antennaDescriptionsBySerial);
 	});
 }
 
@@ -2914,6 +3020,8 @@ function loadRecordingServersFromServer()
 
 var currentEditingServerId = null;
 var currentEditingRecordingServerId = null;
+var currentEditingAntennaDeviceId = '';
+var currentEditingAntennaSerial = '';
 
 function openServerDialog(serverId)
 {
@@ -3054,6 +3162,111 @@ function closeRecordingServerDialog()
 	var modal = document.getElementById('recordingServerModal');
 	modal.classList.add('hidden');
 	currentEditingRecordingServerId = null;
+}
+
+function openAntennaDialog(deviceId)
+{
+	var normalizedDeviceId = String(deviceId || '').trim();
+	if (normalizedDeviceId === '') {
+		return;
+	}
+
+	var currentConfig = getConfigForDevice(normalizedDeviceId);
+	var serial = normalizeAntennaSerial(String(currentConfig.deviceSerial || getDeviceSerialForId(normalizedDeviceId)));
+	if (serial === '') {
+		setStatus('Cannot edit antenna description because this device serial is unavailable.', true);
+		return;
+	}
+
+	currentEditingAntennaDeviceId = normalizedDeviceId;
+	currentEditingAntennaSerial = serial;
+
+	var modal = document.getElementById('antennaModal');
+	var titleEl = document.getElementById('antennaModalTitle');
+	var deviceEl = document.getElementById('antennaModalDevice');
+	var descriptionEl = document.getElementById('antennaModalDescription');
+	var clearBtn = document.getElementById('antennaModalClear');
+	var currentDescription = getAntennaDescriptionForDevice(normalizedDeviceId, currentConfig);
+
+	titleEl.textContent = currentDescription === '' ? 'Add Antenna Description' : 'Edit Antenna Description';
+	deviceEl.value = 'Device ' + normalizedDeviceId + ' (SN: ' + serial + ')';
+	descriptionEl.value = currentDescription;
+	clearBtn.classList.toggle('hidden', currentDescription === '');
+
+	modal.classList.remove('hidden');
+	descriptionEl.focus();
+	descriptionEl.setSelectionRange(descriptionEl.value.length, descriptionEl.value.length);
+}
+
+function closeAntennaDialog()
+{
+	var modal = document.getElementById('antennaModal');
+	modal.classList.add('hidden');
+	currentEditingAntennaDeviceId = '';
+	currentEditingAntennaSerial = '';
+}
+
+function saveAntennaDialog()
+{
+	if (currentEditingAntennaSerial === '') {
+		closeAntennaDialog();
+		return;
+	}
+
+	var serial = currentEditingAntennaSerial;
+	var deviceId = currentEditingAntennaDeviceId;
+	var descriptionEl = document.getElementById('antennaModalDescription');
+	var normalizedDescription = normalizeAntennaDescription(descriptionEl ? descriptionEl.value : '');
+
+	if (normalizedDescription === '') {
+		if (Object.prototype.hasOwnProperty.call(antennaDescriptionsBySerial, serial)) {
+			delete antennaDescriptionsBySerial[serial];
+			pendingAntennaDescriptionsDirty = true;
+			scheduleUiSettingsSave();
+			renderDeviceList();
+			setStatus('Cleared antenna description for serial ' + serial + '.', false);
+		}
+		closeAntennaDialog();
+		return;
+	}
+
+	if (
+		Object.prototype.hasOwnProperty.call(antennaDescriptionsBySerial, serial)
+		&& String(antennaDescriptionsBySerial[serial] || '') === normalizedDescription
+	) {
+		closeAntennaDialog();
+		return;
+	}
+
+	antennaDescriptionsBySerial[serial] = normalizedDescription;
+	pendingAntennaDescriptionsDirty = true;
+	scheduleUiSettingsSave();
+	renderDeviceList();
+	setStatus('Saved antenna description for device ' + deviceId + ' (SN: ' + serial + ').', false);
+	closeAntennaDialog();
+}
+
+function clearAntennaDialog()
+{
+	if (currentEditingAntennaSerial === '') {
+		closeAntennaDialog();
+		return;
+	}
+
+	if (!window.confirm('Clear this antenna description?')) {
+		return;
+	}
+
+	var serial = currentEditingAntennaSerial;
+	if (Object.prototype.hasOwnProperty.call(antennaDescriptionsBySerial, serial)) {
+		delete antennaDescriptionsBySerial[serial];
+		pendingAntennaDescriptionsDirty = true;
+		scheduleUiSettingsSave();
+		renderDeviceList();
+		setStatus('Cleared antenna description for serial ' + serial + '.', false);
+	}
+
+	closeAntennaDialog();
 }
 
 function saveRecordingServer()
@@ -3888,6 +4101,35 @@ function getDeviceSerialForId(deviceId)
 	return extractDeviceSerialFromLabel(descriptor && descriptor.label ? descriptor.label : '');
 }
 
+function normalizeAntennaSerial(serial)
+{
+	return String(serial == null ? '' : serial).trim().replace(/[^A-Za-z0-9._-]+/g, '');
+}
+
+function normalizeAntennaDescription(description)
+{
+	return String(description == null ? '' : description).replace(/\s+/g, ' ').trim();
+}
+
+function getAntennaDescriptionForDevice(deviceId, config)
+{
+	var rawSerial = '';
+	if (config && typeof config === 'object') {
+		rawSerial = String(config.deviceSerial || '');
+	}
+	if (rawSerial.trim() === '') {
+		rawSerial = getDeviceSerialForId(deviceId);
+	}
+	var serial = normalizeAntennaSerial(rawSerial);
+	if (serial === '') {
+		return '';
+	}
+
+	return Object.prototype.hasOwnProperty.call(antennaDescriptionsBySerial, serial)
+		? String(antennaDescriptionsBySerial[serial] || '')
+		: '';
+}
+
 function collectVisibleDevices()
 {
 	var devices = [];
@@ -3948,6 +4190,14 @@ function renderDeviceList()
 		var streamActionButtonsHtml = '';
 		var streamActionButtonsForPills = '';
 		var streamNameRow = '';
+		var antennaSerial = normalizeAntennaSerial(String(config.deviceSerial || getDeviceSerialForId(deviceId)));
+		var antennaDescription = antennaSerial === '' ? '' : getAntennaDescriptionForDevice(deviceId, config);
+		var antennaLabelText = antennaSerial === ''
+			? 'Antenna: unavailable (missing serial)'
+			: 'Antenna: ' + (antennaDescription === '' ? 'Not set' : antennaDescription);
+		var antennaEditLabel = antennaDescription === '' ? 'Add' : 'Edit';
+		var antennaEditDisabledAttr = antennaSerial === '' ? ' disabled' : '';
+		var antennaEditTitleAttr = antennaSerial === '' ? ' title="Device serial unavailable"' : '';
 		if (String(config.streamName || '').trim() !== '') {
 			streamNameRow = '<div class="device-stream-name">' + escapeHtml(String(config.streamName || '')) + '</div>';
 		}
@@ -3971,6 +4221,7 @@ function renderDeviceList()
 					'</div>' +
 					streamNameRow +
 					'<div class="device-subtitle">' + escapeHtml(String(device.label || ('RTL-SDR Device ' + deviceId))) + '</div>' +
+					'<div class="device-antenna-row"><div class="device-antenna-label">' + escapeHtml(antennaLabelText) + '</div><button type="button" class="refresh-button compact action-edit-antenna"' + antennaEditDisabledAttr + antennaEditTitleAttr + '>' + (antennaSerial === '' ? 'Unavailable' : antennaEditLabel) + '</button></div>' +
 				'</div>' +
 				'<div class="device-actions">' +
 					'<button type="button" class="refresh-button primary action-start">' + (isRunning ? 'Retune' : 'Start') + '</button>' +
@@ -4184,6 +4435,10 @@ function getNextRecordingServerId()
 
 function readCardConfig(card)
 {
+	var deviceId = String(card.getAttribute('data-device-id') || '').trim();
+	var existingConfig = getConfigForDevice(deviceId);
+	var deviceSerial = normalizeAntennaSerial(String(existingConfig.deviceSerial || getDeviceSerialForId(deviceId)));
+
 	var streamServerId = card.querySelector('.field-stream-server-id').value.trim();
 	var streamTarget = '';
 	var streamUsername = '';
@@ -4241,8 +4496,8 @@ function readCardConfig(card)
 	}
 
 	return {
-		device: card.getAttribute('data-device-id'),
-		deviceSerial: getDeviceSerialForId(card.getAttribute('data-device-id')),
+		device: deviceId,
+		deviceSerial: deviceSerial,
 		frequency: card.querySelector('.field-frequency').value.trim(),
 		mode: card.querySelector('.field-mode').value.trim(),
 		rtlBandwidth: card.querySelector('.field-rtl-bandwidth').value.trim(),
@@ -4276,6 +4531,11 @@ function persistCardConfig(card)
 	delete config.outputDir;
 	deviceConfigsById[String(config.device)] = config;
 	saveDeviceConfigs(String(config.device));
+}
+
+function editAntennaDescriptionForDevice(deviceId)
+{
+	openAntennaDialog(deviceId);
 }
 
 function syncDraftConfigsFromOpenCards()
@@ -4527,6 +4787,13 @@ function bindDeviceCard(card)
 	if (clearConfigButton) {
 		clearConfigButton.addEventListener('click', function () {
 			clearConfigForCard(card);
+		});
+	}
+
+	var editAntennaButton = card.querySelector('.action-edit-antenna');
+	if (editAntennaButton) {
+		editAntennaButton.addEventListener('click', function () {
+			editAntennaDescriptionForDevice(deviceId);
 		});
 	}
 
@@ -4872,6 +5139,7 @@ function startOrRetuneCard(card)
 	var config = readCardConfig(card);
 	deviceConfigsById[String(config.device)] = config;
 	saveDeviceConfigs(String(config.device));
+	openConfigPanelsByDevice[String(config.device)] = false;
 	setStatus('Applying config for device ' + (config.device || '?') + '...', false);
 	postUserAction('start', config).then(function (result) {
 		setStatus(result.message || 'Started.', false);
@@ -5178,6 +5446,22 @@ function initializePage()
 	document.getElementById('recordingServerModal').addEventListener('click', function (e) {
 		if (e.target === this) {
 			closeRecordingServerDialog();
+		}
+	});
+
+	document.getElementById('antennaModalClose').addEventListener('click', closeAntennaDialog);
+	document.getElementById('antennaModalCancel').addEventListener('click', closeAntennaDialog);
+	document.getElementById('antennaModalSave').addEventListener('click', saveAntennaDialog);
+	document.getElementById('antennaModalClear').addEventListener('click', clearAntennaDialog);
+	document.getElementById('antennaModal').addEventListener('click', function (e) {
+		if (e.target === this) {
+			closeAntennaDialog();
+		}
+	});
+	document.getElementById('antennaModalDescription').addEventListener('keydown', function (e) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			saveAntennaDialog();
 		}
 	});
 
