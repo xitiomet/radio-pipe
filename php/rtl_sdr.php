@@ -5,6 +5,7 @@ declare(strict_types=1);
 $RTL_PAGE_TITLE = 'RTL-SDR Controller';
 $STATE_FILE = __DIR__ . '/rtl_sdr_state.json';
 $STREAMING_SERVERS_FILE = __DIR__ . '/streaming_servers.json';
+$UI_SETTINGS_FILE = __DIR__ . '/rtl_sdr_ui_settings.json';
 $LOG_DIR = __DIR__ . '/rtl_sdr_logs';
 $recordingsRoot = __DIR__ . '/recordings';
 
@@ -122,6 +123,93 @@ function save_streaming_servers(string $filePath, array $servers): bool
 	}
 
 	return file_put_contents($filePath, $encoded . "\n", LOCK_EX) !== false;
+}
+
+function default_ui_settings(): array
+{
+	return array(
+		'deviceConfigs' => array(),
+		'templates' => array(),
+	);
+}
+
+function normalize_ui_settings(array $rawSettings): array
+{
+	$defaults = default_ui_settings();
+	$normalized = $defaults;
+
+	$rawDeviceConfigs = isset($rawSettings['deviceConfigs']) && is_array($rawSettings['deviceConfigs'])
+		? $rawSettings['deviceConfigs']
+		: array();
+	$deviceConfigs = array();
+	foreach ($rawDeviceConfigs as $deviceId => $config) {
+		$normalizedDeviceId = normalize_device_id($deviceId);
+		if ($normalizedDeviceId === '' || !is_array($config)) {
+			continue;
+		}
+		$config['device'] = $normalizedDeviceId;
+		$deviceConfigs[$normalizedDeviceId] = $config;
+	}
+	$normalized['deviceConfigs'] = $deviceConfigs;
+
+	$rawTemplates = isset($rawSettings['templates']) && is_array($rawSettings['templates'])
+		? $rawSettings['templates']
+		: array();
+	$templates = array();
+	foreach ($rawTemplates as $templateName => $templateConfig) {
+		$name = trim((string)$templateName);
+		if ($name === '' || !is_array($templateConfig)) {
+			continue;
+		}
+		$templateConfig['templateName'] = $name;
+		$templates[$name] = $templateConfig;
+	}
+	$normalized['templates'] = $templates;
+
+	return $normalized;
+}
+
+function load_ui_settings(string $filePath): array
+{
+	if (!file_exists($filePath)) {
+		$defaults = default_ui_settings();
+		save_ui_settings($filePath, $defaults);
+		return $defaults;
+	}
+
+	$raw = file_get_contents($filePath);
+	if (!is_string($raw) || trim($raw) === '') {
+		return default_ui_settings();
+	}
+
+	$decoded = json_decode($raw, true);
+	if (!is_array($decoded)) {
+		return default_ui_settings();
+	}
+
+	return normalize_ui_settings($decoded);
+}
+
+function save_ui_settings(string $filePath, array $settings): bool
+{
+	$normalized = normalize_ui_settings($settings);
+	$toPersist = $normalized;
+	$toPersist['deviceConfigs'] = (object)$normalized['deviceConfigs'];
+	$toPersist['templates'] = (object)$normalized['templates'];
+	$encoded = json_encode($toPersist, JSON_PRETTY_PRINT);
+	if (!is_string($encoded)) {
+		return false;
+	}
+
+	return file_put_contents($filePath, $encoded . "\n", LOCK_EX) !== false;
+}
+
+function ui_settings_for_response(array $settings): array
+{
+	$response = $settings;
+	$response['deviceConfigs'] = (object)($settings['deviceConfigs'] ?? array());
+	$response['templates'] = (object)($settings['templates'] ?? array());
+	return $response;
 }
 
 if (!file_exists($STREAMING_SERVERS_FILE)) {
@@ -913,6 +1001,26 @@ if ($action !== '') {
 		send_json(array('ok' => true, 'servers' => $servers));
 	}
 
+	if ($action === 'settings_get') {
+		$settings = load_ui_settings($UI_SETTINGS_FILE);
+		send_json(array('ok' => true, 'settings' => ui_settings_for_response($settings)));
+	}
+
+	if ($action === 'settings_set') {
+		$payload = $_POST;
+		if (is_array($jsonPayload) && count($jsonPayload) > 0) {
+			$payload = array_merge($payload, $jsonPayload);
+		}
+
+		$incoming = isset($payload['settings']) && is_array($payload['settings']) ? $payload['settings'] : array();
+		$settings = normalize_ui_settings($incoming);
+		if (!save_ui_settings($UI_SETTINGS_FILE, $settings)) {
+			send_json(array('ok' => false, 'error' => 'Failed to save UI settings.'), 500);
+		}
+
+		send_json(array('ok' => true, 'settings' => ui_settings_for_response($settings)));
+	}
+
 	if ($action === 'list') {
 		save_state($STATE_FILE, $state);
 		send_json(array('ok' => true, 'instances' => list_instances($state)));
@@ -1132,8 +1240,8 @@ if ($action !== '') {
 			background: radial-gradient(circle, rgba(217, 164, 65, 0.16), transparent 70%);
 			pointer-events: none;
 		}
-		.device-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; position: relative; z-index: 1; }
-		.device-header > div:first-child { flex: 1 1 auto; min-width: 0; }
+		.device-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: start; position: relative; z-index: 1; }
+		.device-title-row { min-width: 0; }
 		.state-pills {
 			display: inline-flex;
 			align-items: center;
@@ -1144,7 +1252,7 @@ if ($action !== '') {
 			white-space: nowrap;
 		}
 		.device-title { margin: 0; font-size: 20px; }
-		.device-subtitle { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+		.device-subtitle { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.state-pill {
 			display: inline-flex;
 			align-items: center;
@@ -1288,6 +1396,10 @@ var openConfigPanelsByDevice = {};
 var openLogPanelsByDevice = {};
 var logContentByDevice = {};
 var streamPlayersByDevice = {};
+var uiSettingsSaveTimer = null;
+var uiSettingsSaveInFlight = false;
+var uiSettingsSaveQueued = false;
+var UI_SETTINGS_SAVE_DELAY_MS = 400;
 
 function setStatus(message, isError)
 {
@@ -1327,6 +1439,75 @@ function initTheme()
 	applyTheme(savedTheme === 'theme-light' ? 'theme-light' : 'theme-dark');
 }
 
+function collectUiSettingsPayload()
+{
+	return {
+		deviceConfigs: deviceConfigsById,
+		templates: settingsTemplates
+	};
+}
+
+function saveUiSettingsNow()
+{
+	if (uiSettingsSaveInFlight) {
+		uiSettingsSaveQueued = true;
+		return Promise.resolve();
+	}
+
+	uiSettingsSaveInFlight = true;
+	return postAction('settings_set', { settings: collectUiSettingsPayload() }).then(function (result) {
+		if (result && result.settings && typeof result.settings === 'object') {
+			if (result.settings.deviceConfigs && typeof result.settings.deviceConfigs === 'object' && !Array.isArray(result.settings.deviceConfigs)) {
+				deviceConfigsById = result.settings.deviceConfigs;
+			}
+			if (result.settings.templates && typeof result.settings.templates === 'object' && !Array.isArray(result.settings.templates)) {
+				settingsTemplates = result.settings.templates;
+			}
+		}
+	}).catch(function (error) {
+		setStatus('Failed to save UI settings: ' + error.message, true);
+	}).finally(function () {
+		uiSettingsSaveInFlight = false;
+		if (uiSettingsSaveQueued) {
+			uiSettingsSaveQueued = false;
+			saveUiSettingsNow();
+		}
+	});
+}
+
+function scheduleUiSettingsSave()
+{
+	if (uiSettingsSaveTimer !== null) {
+		window.clearTimeout(uiSettingsSaveTimer);
+	}
+	uiSettingsSaveTimer = window.setTimeout(function () {
+		uiSettingsSaveTimer = null;
+		saveUiSettingsNow();
+	}, UI_SETTINGS_SAVE_DELAY_MS);
+}
+
+function loadUiSettingsFromServer()
+{
+	return postAction('settings_get', {}).then(function (result) {
+		var settings = (result && result.settings && typeof result.settings === 'object') ? result.settings : {};
+
+		if (settings.deviceConfigs && typeof settings.deviceConfigs === 'object' && !Array.isArray(settings.deviceConfigs)) {
+			deviceConfigsById = settings.deviceConfigs;
+		} else {
+			deviceConfigsById = {};
+		}
+
+		if (settings.templates && typeof settings.templates === 'object' && !Array.isArray(settings.templates)) {
+			settingsTemplates = settings.templates;
+		} else {
+			settingsTemplates = {};
+		}
+	}).catch(function () {
+		deviceConfigsById = {};
+		settingsTemplates = {};
+	});
+}
+
 function updateSummary()
 {
 	var detectedCount = knownDetectedDevices.length;
@@ -1336,92 +1517,22 @@ function updateSummary()
 
 function saveDeviceConfigs()
 {
-	try {
-		window.localStorage.setItem('rtlSdrDeviceConfigs', JSON.stringify(deviceConfigsById));
-	} catch (error) {
-	}
+	scheduleUiSettingsSave();
 }
 
 function saveTemplates()
 {
-	try {
-		window.localStorage.setItem('rtlSdrTemplates', JSON.stringify(settingsTemplates));
-	} catch (error) {
-	}
+	scheduleUiSettingsSave();
 }
 
 function saveStreamServers()
 {
-	try {
-		window.localStorage.setItem('rtlSdrStreamServers', JSON.stringify(streamServersById));
-	} catch (error) {
-	}
-
 	return postAction('stream_servers_set', { servers: streamServersById }).then(function (result) {
 		if (result && result.servers && typeof result.servers === 'object') {
 			streamServersById = result.servers;
-			try {
-				window.localStorage.setItem('rtlSdrStreamServers', JSON.stringify(streamServersById));
-			} catch (storageError) {
-			}
 		}
 		return streamServersById;
 	});
-}
-
-
-function loadDeviceConfigs()
-{
-	var stored = null;
-	try {
-		stored = window.localStorage.getItem('rtlSdrDeviceConfigs');
-		if (!stored) {
-			return {};
-		}
-		var parsed = JSON.parse(stored);
-		if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-			return parsed;
-		}
-		return {};
-	} catch (error) {
-		return {};
-	}
-}
-
-function loadTemplates()
-{
-	var stored = null;
-	try {
-		stored = window.localStorage.getItem('rtlSdrTemplates');
-		if (!stored) {
-			return {};
-		}
-		var parsed = JSON.parse(stored);
-		if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-			return parsed;
-		}
-		return {};
-	} catch (error) {
-		return {};
-	}
-}
-
-function loadStreamServers()
-{
-	var stored = null;
-	try {
-		stored = window.localStorage.getItem('rtlSdrStreamServers');
-		if (!stored) {
-			return {};
-		}
-		var parsed = JSON.parse(stored);
-		if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-			return parsed;
-		}
-		return {};
-	} catch (error) {
-		return {};
-	}
 }
 
 function loadStreamServersFromServer()
@@ -1432,13 +1543,9 @@ function loadStreamServersFromServer()
 			return streamServersById;
 		}
 		streamServersById = result.servers;
-		try {
-			window.localStorage.setItem('rtlSdrStreamServers', JSON.stringify(streamServersById));
-		} catch (storageError) {
-		}
 		return streamServersById;
 	}).catch(function () {
-		streamServersById = loadStreamServers();
+		streamServersById = {};
 		return streamServersById;
 	});
 }
@@ -2019,14 +2126,14 @@ function renderDeviceList()
 		markup += '' +
 			'<article class="panel device-card" data-device-id="' + escapeHtml(deviceId) + '">' +
 				'<div class="device-header">' +
-					'<div>' +
+					'<div class="device-title-row">' +
 						'<h3 class="device-title">Device ' + escapeHtml(deviceId) + '</h3>' +
-						'<div class="device-subtitle">' + escapeHtml(String(device.label || ('RTL-SDR Device ' + deviceId))) + '</div>' +
 					'</div>' +
 					'<div class="state-pills">' +
 						'<div class="state-pill ' + stateClass + '">' + stateLabel + '</div>' +
 						(isStreamMode ? streamActionButtonsForPills : '<div class="state-pill ' + rxIndicator.className + '">' + rxIndicator.label + '</div>') +
 					'</div>' +
+					'<div class="device-subtitle">' + escapeHtml(String(device.label || ('RTL-SDR Device ' + deviceId))) + '</div>' +
 				'</div>' +
 				'<div class="device-actions">' +
 					'<button type="button" class="refresh-button primary action-start">' + (isRunning ? 'Retune' : 'Start') + '</button>' +
@@ -2613,10 +2720,6 @@ function initializePage()
 		setStatus('Applied template "' + templateName + '" to ' + selectedTargets.length + ' device(s).', false);
 	});
 
-	deviceConfigsById = loadDeviceConfigs();
-	settingsTemplates = loadTemplates();
-	streamServersById = loadStreamServers();
-
 	document.getElementById('serverModalClose').addEventListener('click', closeServerDialog);
 	document.getElementById('serverModalCancel').addEventListener('click', closeServerDialog);
 	document.getElementById('serverModalSave').addEventListener('click', saveServer);
@@ -2627,8 +2730,6 @@ function initializePage()
 		}
 	});
 
-	refreshGlobalTemplateSelector();
-	refreshTemplateDeviceSelector();
 	var templatesExpanded = null;
 	try {
 		templatesExpanded = window.localStorage.getItem('rtlSdrTemplatesExpanded');
@@ -2636,11 +2737,18 @@ function initializePage()
 		templatesExpanded = null;
 	}
 	setTemplateToolbarVisible(templatesExpanded === '1');
-	renderDeviceList();
-	loadStreamServersFromServer().finally(function () {
+
+	loadUiSettingsFromServer().finally(function () {
+		refreshGlobalTemplateSelector();
+		refreshTemplateDeviceSelector();
 		renderDeviceList();
-		scanDevices().finally(function () {
-		refreshInstances();
+		loadStreamServersFromServer().finally(function () {
+			refreshGlobalTemplateSelector();
+			refreshTemplateDeviceSelector();
+			renderDeviceList();
+			scanDevices().finally(function () {
+			refreshInstances();
+			});
 		});
 	});
 	window.setInterval(refreshInstances, 6000);
