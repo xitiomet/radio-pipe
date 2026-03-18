@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 $RTL_PAGE_TITLE = 'RTL-SDR Controller';
 $STATE_FILE = __DIR__ . '/rtl_sdr_state.json';
+$DESIRED_STATE_FILE = __DIR__ . '/rtl_sdr_desired_state.json';
 $STREAMING_SERVERS_FILE = __DIR__ . '/streaming_servers.json';
 $RECORDING_SERVERS_FILE = __DIR__ . '/recording_servers.json';
 $UI_SETTINGS_FILE = __DIR__ . '/rtl_sdr_ui_settings.json';
@@ -14,6 +15,16 @@ $recordingsRoot = __DIR__ . '/recordings';
 if (file_exists(__DIR__ . '/config.php')) {
 	include __DIR__ . '/config.php';
 }
+
+// Auto-recovery defaults. These can be overridden in config.php.
+$AUTO_RECOVERY_ENABLED = isset($AUTO_RECOVERY_ENABLED) ? $AUTO_RECOVERY_ENABLED : true;
+$AUTO_RECOVERY_MAX_ATTEMPTS = isset($AUTO_RECOVERY_MAX_ATTEMPTS) ? max(1, (int)$AUTO_RECOVERY_MAX_ATTEMPTS) : 8;
+$AUTO_RECOVERY_BASE_DELAY_SECONDS = isset($AUTO_RECOVERY_BASE_DELAY_SECONDS) ? max(1, (int)$AUTO_RECOVERY_BASE_DELAY_SECONDS) : 5;
+$AUTO_RECOVERY_MAX_DELAY_SECONDS = isset($AUTO_RECOVERY_MAX_DELAY_SECONDS) ? max(5, (int)$AUTO_RECOVERY_MAX_DELAY_SECONDS) : 300;
+$AUTO_RECOVERY_RESET_AFTER_SECONDS = isset($AUTO_RECOVERY_RESET_AFTER_SECONDS) ? max(30, (int)$AUTO_RECOVERY_RESET_AFTER_SECONDS) : 900;
+$AUTO_RECOVERY_LAUNCH_ATTEMPT_DELAYS_US = isset($AUTO_RECOVERY_LAUNCH_ATTEMPT_DELAYS_US) && is_array($AUTO_RECOVERY_LAUNCH_ATTEMPT_DELAYS_US)
+	? $AUTO_RECOVERY_LAUNCH_ATTEMPT_DELAYS_US
+	: array(500000, 1000000, 1800000);
 
 function send_json(array $payload, int $statusCode = 200): void
 {
@@ -80,6 +91,118 @@ function save_state(string $stateFile, array $state): bool
 	}
 
 	return file_put_contents($stateFile, $encoded . "\n", LOCK_EX) !== false;
+}
+
+function load_desired_state(string $desiredStateFile): array
+{
+	if (!file_exists($desiredStateFile)) {
+		return array();
+	}
+
+	$raw = file_get_contents($desiredStateFile);
+	if (!is_string($raw) || trim($raw) === '') {
+		return array();
+	}
+
+	$decoded = json_decode($raw, true);
+	if (!is_array($decoded)) {
+		return array();
+	}
+
+	$desired = array();
+	foreach ($decoded as $rawDeviceId => $entry) {
+		$deviceId = normalize_device_id((string)$rawDeviceId);
+		if ($deviceId === '') {
+			continue;
+		}
+
+		$running = true;
+		$updatedAt = 0;
+		if (is_array($entry)) {
+			$running = parse_boolean_flag($entry['running'] ?? true, true);
+			$updatedAt = max(0, (int)($entry['updatedAt'] ?? 0));
+		} else {
+			$running = parse_boolean_flag($entry, true);
+		}
+
+		$desired[$deviceId] = array(
+			'running' => $running,
+			'updatedAt' => $updatedAt,
+		);
+	}
+
+	return $desired;
+}
+
+function save_desired_state(string $desiredStateFile, array $desiredState): bool
+{
+	$normalized = array();
+	foreach ($desiredState as $rawDeviceId => $entry) {
+		$deviceId = normalize_device_id((string)$rawDeviceId);
+		if ($deviceId === '') {
+			continue;
+		}
+
+		$running = true;
+		$updatedAt = 0;
+		if (is_array($entry)) {
+			$running = parse_boolean_flag($entry['running'] ?? true, true);
+			$updatedAt = max(0, (int)($entry['updatedAt'] ?? 0));
+		} else {
+			$running = parse_boolean_flag($entry, true);
+		}
+
+		if ($updatedAt <= 0) {
+			$updatedAt = time();
+		}
+
+		$normalized[$deviceId] = array(
+			'running' => $running,
+			'updatedAt' => $updatedAt,
+		);
+	}
+
+	$encoded = json_encode((object)$normalized, JSON_PRETTY_PRINT);
+	if (!is_string($encoded)) {
+		return false;
+	}
+
+	return file_put_contents($desiredStateFile, $encoded . "\n", LOCK_EX) !== false;
+}
+
+function device_is_desired_running(array $desiredState, string $deviceId, bool $default = true): bool
+{
+	$normalizedDeviceId = normalize_device_id($deviceId);
+	if ($normalizedDeviceId === '' || !isset($desiredState[$normalizedDeviceId])) {
+		return $default;
+	}
+
+	$entry = $desiredState[$normalizedDeviceId];
+	if (is_array($entry)) {
+		return parse_boolean_flag($entry['running'] ?? $default, $default);
+	}
+
+	return parse_boolean_flag($entry, $default);
+}
+
+function set_device_desired_running(array &$desiredState, string $deviceId, bool $running): bool
+{
+	$normalizedDeviceId = normalize_device_id($deviceId);
+	if ($normalizedDeviceId === '') {
+		return false;
+	}
+
+	$current = device_is_desired_running($desiredState, $normalizedDeviceId, true);
+	if ($current === $running && isset($desiredState[$normalizedDeviceId])) {
+		return false;
+	}
+
+	$desiredState[$normalizedDeviceId] = array(
+		'running' => $running,
+		'updatedAt' => time(),
+	);
+
+	return true;
 }
 
 function normalize_streaming_servers(array $rawServers): array
@@ -511,6 +634,10 @@ if (!file_exists($TEMPLATES_FILE)) {
 	load_templates($TEMPLATES_FILE, $UI_SETTINGS_FILE);
 }
 
+if (!file_exists($DESIRED_STATE_FILE)) {
+	file_put_contents($DESIRED_STATE_FILE, "{}\n", LOCK_EX);
+}
+
 function parse_json_request_body(): array
 {
 	$rawInput = file_get_contents('php://input');
@@ -537,14 +664,309 @@ function is_process_running(int $pid): bool
 	return trim((string)$result) === '0';
 }
 
-function cleanup_stale_instances(array &$state): void
+function parse_boolean_flag($value, bool $default): bool
 {
-	foreach ($state as $device => $instance) {
-		$pid = isset($instance['pid']) ? (int)$instance['pid'] : 0;
-		if (!is_process_running($pid)) {
-			unset($state[$device]);
+	if (is_bool($value)) {
+		return $value;
+	}
+
+	if (is_int($value) || is_float($value)) {
+		return ((int)$value) !== 0;
+	}
+
+	$normalized = strtolower(trim((string)$value));
+	if ($normalized === '') {
+		return $default;
+	}
+
+	if (in_array($normalized, array('1', 'true', 'yes', 'on', 'enabled'), true)) {
+		return true;
+	}
+
+	if (in_array($normalized, array('0', 'false', 'no', 'off', 'disabled'), true)) {
+		return false;
+	}
+
+	return $default;
+}
+
+function get_auto_recovery_settings(): array
+{
+	global $AUTO_RECOVERY_ENABLED;
+	global $AUTO_RECOVERY_MAX_ATTEMPTS;
+	global $AUTO_RECOVERY_BASE_DELAY_SECONDS;
+	global $AUTO_RECOVERY_MAX_DELAY_SECONDS;
+	global $AUTO_RECOVERY_RESET_AFTER_SECONDS;
+	global $AUTO_RECOVERY_LAUNCH_ATTEMPT_DELAYS_US;
+
+	$launchDelays = array();
+	if (is_array($AUTO_RECOVERY_LAUNCH_ATTEMPT_DELAYS_US)) {
+		foreach ($AUTO_RECOVERY_LAUNCH_ATTEMPT_DELAYS_US as $delay) {
+			$delayUs = max(0, (int)$delay);
+			if ($delayUs <= 0) {
+				continue;
+			}
+			$launchDelays[] = $delayUs;
 		}
 	}
+
+	if (count($launchDelays) === 0) {
+		$launchDelays = array(500000, 1000000, 1800000);
+	}
+
+	return array(
+		'enabled' => parse_boolean_flag($AUTO_RECOVERY_ENABLED, true),
+		'maxAttempts' => max(1, (int)$AUTO_RECOVERY_MAX_ATTEMPTS),
+		'baseDelaySeconds' => max(1, (int)$AUTO_RECOVERY_BASE_DELAY_SECONDS),
+		'maxDelaySeconds' => max(5, (int)$AUTO_RECOVERY_MAX_DELAY_SECONDS),
+		'resetAfterSeconds' => max(30, (int)$AUTO_RECOVERY_RESET_AFTER_SECONDS),
+		'launchAttemptDelaysUs' => $launchDelays,
+	);
+}
+
+function calculate_auto_recovery_delay_seconds(int $attemptNumber, int $baseDelaySeconds, int $maxDelaySeconds): int
+{
+	$delay = max(1, $baseDelaySeconds);
+	$exponent = max(0, $attemptNumber - 1);
+
+	for ($i = 0; $i < $exponent; $i++) {
+		$delay *= 2;
+		if ($delay >= $maxDelaySeconds) {
+			return $maxDelaySeconds;
+		}
+	}
+
+	return min($delay, $maxDelaySeconds);
+}
+
+function append_instance_log_line(string $logDir, string $deviceId, array $instance, string $tag, string $message): void
+{
+	$logPath = resolve_log_path_for_device($logDir, $deviceId, array($deviceId => $instance));
+	if ($logPath === '' && isset($instance['logFile'])) {
+		$candidate = $logDir . '/' . basename((string)$instance['logFile']);
+		$logPath = $candidate;
+	}
+
+	if ($logPath === '') {
+		return;
+	}
+
+	$line = '[' . date('Y-m-d H:i:s') . '] [' . strtoupper($tag) . '] ' . trim($message) . "\n";
+	file_put_contents($logPath, $line, FILE_APPEND | LOCK_EX);
+}
+
+function build_instance_state(array $config, array $startResult, bool $autoRecoveryEnabled, int $recoveryAttempts = 0): array
+{
+	return array(
+		'pid' => (int)($startResult['pid'] ?? 0),
+		'startedAt' => time(),
+		'logFile' => (string)($startResult['logFile'] ?? ''),
+		'command' => (string)($startResult['command'] ?? ''),
+		'config' => $config,
+		'autoRecoveryEnabled' => $autoRecoveryEnabled,
+		'recoveryAttempts' => max(0, $recoveryAttempts),
+		'recoveryLastFailureAt' => 0,
+		'recoveryNextRetryAt' => 0,
+		'recoveryLastError' => '',
+	);
+}
+
+function resolve_auto_recovery_enabled_from_payload(array $payload): bool
+{
+	$settings = get_auto_recovery_settings();
+	$default = (bool)$settings['enabled'];
+
+	if (array_key_exists('autoRecovery', $payload)) {
+		return parse_boolean_flag($payload['autoRecovery'], $default);
+	}
+
+	if (array_key_exists('autoRestart', $payload)) {
+		return parse_boolean_flag($payload['autoRestart'], $default);
+	}
+
+	return $default;
+}
+
+function cleanup_stale_instances(array &$state, string $logDir, array &$desiredState, bool &$desiredStateChanged = false): bool
+{
+	$settings = get_auto_recovery_settings();
+	$now = time();
+	$changed = false;
+	$desiredStateChanged = false;
+
+	foreach ($state as $device => $instance) {
+		if (!is_array($instance)) {
+			unset($state[$device]);
+			$changed = true;
+			continue;
+		}
+
+		$config = isset($instance['config']) && is_array($instance['config']) ? $instance['config'] : array();
+		$deviceId = normalize_device_id((string)($config['device'] ?? $device));
+		if ($deviceId === '') {
+			$deviceId = normalize_device_id((string)$device);
+		}
+		if ($deviceId === '') {
+			unset($state[$device]);
+			$changed = true;
+			continue;
+		}
+
+		$pid = isset($instance['pid']) ? (int)$instance['pid'] : 0;
+		$running = is_process_running($pid);
+		$desiredRunning = device_is_desired_running($desiredState, $deviceId, true);
+
+		if (!$desiredRunning) {
+			if ($running) {
+				append_instance_log_line(
+					$logDir,
+					$deviceId,
+					$instance,
+					'RECOVERY',
+					'Desired state is stopped; terminating process and skipping auto-recovery.'
+				);
+				stop_instance_by_pid($pid);
+			}
+
+			unset($state[$device]);
+			$changed = true;
+			continue;
+		}
+
+		if ($running) {
+			$attempts = max(0, (int)($instance['recoveryAttempts'] ?? 0));
+			$startedAt = isset($instance['startedAt']) ? (int)$instance['startedAt'] : 0;
+			if (
+				$attempts > 0
+				&& $startedAt > 0
+				&& ($now - $startedAt) >= (int)$settings['resetAfterSeconds']
+			) {
+				$state[$device]['recoveryAttempts'] = 0;
+				$state[$device]['recoveryLastFailureAt'] = 0;
+				$state[$device]['recoveryNextRetryAt'] = 0;
+				$state[$device]['recoveryLastError'] = '';
+				$changed = true;
+				append_instance_log_line(
+					$logDir,
+					(string)$device,
+					$state[$device],
+					'RECOVERY',
+					'Stability window reached; crash counter reset.'
+				);
+			}
+			continue;
+		}
+
+		if (count($config) === 0) {
+			unset($state[$device]);
+			$changed = true;
+			continue;
+		}
+
+		$autoRecoveryEnabled = parse_boolean_flag(
+			$instance['autoRecoveryEnabled'] ?? $settings['enabled'],
+			(bool)$settings['enabled']
+		);
+
+		if (!$autoRecoveryEnabled) {
+			unset($state[$device]);
+			$changed = true;
+			continue;
+		}
+
+		$attempts = max(0, (int)($instance['recoveryAttempts'] ?? 0));
+		$nextRetryAt = max(0, (int)($instance['recoveryNextRetryAt'] ?? 0));
+
+		if ($nextRetryAt > $now) {
+			if ($pid !== 0 || !isset($instance['autoRecoveryEnabled'])) {
+				$changed = true;
+			}
+			$state[$deviceId] = $instance;
+			$state[$deviceId]['pid'] = 0;
+			$state[$deviceId]['autoRecoveryEnabled'] = $autoRecoveryEnabled;
+			if ($deviceId !== (string)$device) {
+				unset($state[$device]);
+			}
+			continue;
+		}
+
+		if ($attempts >= (int)$settings['maxAttempts']) {
+			append_instance_log_line(
+				$logDir,
+				$deviceId,
+				$instance,
+				'RECOVERY',
+				'Automatic recovery stopped after reaching max attempts (' . (int)$settings['maxAttempts'] . ').'
+			);
+			unset($state[$device]);
+			$changed = true;
+			continue;
+		}
+
+		$attemptNumber = $attempts + 1;
+		append_instance_log_line(
+			$logDir,
+			$deviceId,
+			$instance,
+			'RECOVERY',
+			'Detected process exit; restart attempt ' . $attemptNumber . ' of ' . (int)$settings['maxAttempts'] . '.'
+		);
+
+		$startResult = start_instance($config, $logDir, (array)$settings['launchAttemptDelaysUs']);
+		if ($startResult['ok'] === true) {
+			$recoveredInstance = build_instance_state($config, $startResult, $autoRecoveryEnabled, $attemptNumber);
+			$state[$deviceId] = $recoveredInstance;
+			if ($deviceId !== (string)$device) {
+				unset($state[$device]);
+			}
+			$changed = true;
+			append_instance_log_line(
+				$logDir,
+				$deviceId,
+				$recoveredInstance,
+				'RECOVERY',
+				'Restart succeeded on attempt ' . $attemptNumber . '.'
+			);
+			continue;
+		}
+
+		$delaySeconds = calculate_auto_recovery_delay_seconds(
+			$attemptNumber,
+			(int)$settings['baseDelaySeconds'],
+			(int)$settings['maxDelaySeconds']
+		);
+		$nextRetry = $now + $delaySeconds;
+		$errorMessage = mask_sensitive_command_for_log((string)($startResult['error'] ?? 'Auto recovery start attempt failed.'));
+
+		$state[$deviceId] = $instance;
+		$state[$deviceId]['pid'] = 0;
+		$state[$deviceId]['autoRecoveryEnabled'] = $autoRecoveryEnabled;
+		$state[$deviceId]['recoveryAttempts'] = $attemptNumber;
+		$state[$deviceId]['recoveryLastFailureAt'] = $now;
+		$state[$deviceId]['recoveryNextRetryAt'] = $nextRetry;
+		$state[$deviceId]['recoveryLastError'] = $errorMessage;
+		if (isset($startResult['logFile'])) {
+			$state[$deviceId]['logFile'] = (string)$startResult['logFile'];
+		}
+		if (isset($startResult['command'])) {
+			$state[$deviceId]['command'] = (string)$startResult['command'];
+		}
+
+		if ($deviceId !== (string)$device) {
+			unset($state[$device]);
+		}
+
+		$changed = true;
+		append_instance_log_line(
+			$logDir,
+			$deviceId,
+			$state[$deviceId],
+			'RECOVERY',
+			'Restart attempt failed: ' . $errorMessage . ' Next retry in ' . $delaySeconds . 's.'
+		);
+	}
+
+	return $changed;
 }
 
 function normalize_device_id($rawValue): string
@@ -893,6 +1315,18 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		throw new RuntimeException('Gain must be numeric or "auto".');
 	}
 
+	$dcsRaw = strtoupper(trim((string)($input['dcs'] ?? ($input['dcsCode'] ?? ''))));
+	if ($dcsRaw === 'OFF' || $dcsRaw === 'NONE') {
+		$dcsRaw = '';
+	}
+	$dcsCode = '';
+	if ($dcsRaw !== '') {
+		if (preg_match('/^D?([0-7]{1,3})(?:[NI])?$/', $dcsRaw, $dcsMatches) !== 1) {
+			throw new RuntimeException('DCS must be an octal code (examples: 023, D023N, D023I).');
+		}
+		$dcsCode = str_pad((string)$dcsMatches[1], 3, '0', STR_PAD_LEFT);
+	}
+
 	$rawBiasT = $input['biasT'] ?? ($input['bias_t'] ?? '0');
 	if (is_bool($rawBiasT)) {
 		$biasTEnabled = $rawBiasT;
@@ -1061,6 +1495,7 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'rtlBandwidth' => $rtlBandwidth,
 		'sampleRate' => $sampleRate,
 		'squelch' => (int)$squelch,
+		'dcs' => $dcsCode,
 		'gain' => $gain,
 		'biasT' => $biasTEnabled ? 1 : 0,
 		'threshold' => $thresholdValue,
@@ -1161,6 +1596,83 @@ function build_silence_padder_command(int $sampleRate): string
 		' if r>0:time.sleep(r)',
 	);
 	return 'python3 -c ' . escapeshellarg(implode("\n", $lines));
+}
+
+function rms_cast_recorder_supports_stdout_padding(): bool
+{
+	static $supports = null;
+	if ($supports !== null) {
+		return $supports;
+	}
+
+	if (!command_exists('rms-cast-recorder')) {
+		$supports = false;
+		return $supports;
+	}
+
+	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('rms-cast-recorder --help 2>&1'));
+	if (!is_string($helpOutput) || trim($helpOutput) === '') {
+		$supports = false;
+		return $supports;
+	}
+
+	$supports =
+		stripos($helpOutput, '--stdout') !== false
+		&& stripos($helpOutput, '--stdout-raw') !== false
+		&& stripos($helpOutput, '--stdout-pad') !== false;
+
+	return $supports;
+}
+
+function build_stream_input_conditioner_command(array $config): string
+{
+	$sampleRate = max(1, (int)$config['rtlBandwidth']);
+	$dcsCode = trim((string)($config['dcs'] ?? ''));
+
+	if (rms_cast_recorder_supports_stdout_padding()) {
+		// Use recorder's raw stdout + pad mode as a lightweight conditioner for ffmpeg.
+		// Threshold/silence values are set to keep the gate effectively open while
+		// still allowing stdout pad to smooth upstream stalls.
+		$conditionerCommand = array(
+			'rms-cast-recorder',
+			'--stdin',
+			'--stdin-raw',
+			'--stdin-rate',
+			(string)$sampleRate,
+			'--stdin-channels',
+			'1',
+			'--stdin-bits',
+			'16',
+			'-r',
+			(string)$sampleRate,
+			'-t',
+			'-120',
+			'-s',
+			'600',
+		);
+
+		if ($dcsCode !== '') {
+			$conditionerCommand[] = '--dcs';
+			$conditionerCommand[] = $dcsCode;
+		}
+
+		array_push(
+			$conditionerCommand,
+			'--stdout',
+			'--stdout-raw',
+			'--stdout-rate',
+			(string)$sampleRate,
+			'--stdout-channels',
+			'1',
+			'--stdout-bits',
+			'16',
+			'--stdout-pad'
+		);
+
+		return command_from_parts($conditionerCommand);
+	}
+
+	return build_silence_padder_command($sampleRate);
 }
 
 function build_signal_description(array $config): string
@@ -1431,12 +1943,14 @@ function build_pipeline_command(array $config): string
 	}
 
 	$pipeline = command_from_parts($rtlCommand);
-	$pipeline .= ' | ' . build_silence_padder_command((int)$config['rtlBandwidth']);
 
 	if ((string)$config['outputMode'] === 'stream') {
+		$pipeline .= ' | ' . build_stream_input_conditioner_command($config);
 		$pipeline .= ' | ' . build_stream_command($config);
 		return $pipeline;
 	}
+
+	$pipeline .= ' | ' . build_silence_padder_command((int)$config['rtlBandwidth']);
 
 	$recorderCommand = array(
 		'rms-cast-recorder',
@@ -1459,6 +1973,12 @@ function build_pipeline_command(array $config): string
 		'-n',
 		build_output_display_name($config),
 	);
+
+	$dcsCode = trim((string)($config['dcs'] ?? ''));
+	if ($dcsCode !== '') {
+		$recorderCommand[] = '--dcs';
+		$recorderCommand[] = $dcsCode;
+	}
 
 	$afterRecordHook = build_after_record_hook_argument($config);
 	if ($afterRecordHook !== '') {
@@ -1491,19 +2011,33 @@ function stop_instance_by_pid(int $pid): void
 	usleep(1500000);
 }
 
-function start_instance(array $config, string $logDir): array
+function start_instance(array $config, string $logDir, ?array $attemptDelaysUs = null): array
 {
 	$uploadModeEnabled =
 		(string)$config['outputMode'] === 'recorder'
 		&& in_array(strtolower((string)($config['afterRecordAction'] ?? 'none')), array('upload', 'upload_delete'), true);
+	$streamUsesRecorderStdoutPad = (string)$config['outputMode'] === 'stream' && rms_cast_recorder_supports_stdout_padding();
+	$dcsCode = trim((string)($config['dcs'] ?? ''));
 
-	if (!command_exists('python3')) {
+	if ((string)$config['outputMode'] !== 'stream' && !command_exists('python3')) {
 		return array('ok' => false, 'error' => 'python3 is required for silence padding but was not found in PATH. Install python3 to use this pipeline.');
+	}
+
+	if ((string)$config['outputMode'] === 'stream' && !$streamUsesRecorderStdoutPad && !command_exists('python3')) {
+		return array('ok' => false, 'error' => 'python3 is required for stream input padding fallback but was not found in PATH. Install python3 or upgrade rms-cast-recorder to support --stdout-pad.');
+	}
+
+	if ((string)$config['outputMode'] === 'stream' && $dcsCode !== '' && !$streamUsesRecorderStdoutPad) {
+		return array('ok' => false, 'error' => 'DCS in Stream output mode requires rms-cast-recorder support for --stdout-raw and --stdout-pad.');
 	}
 
 	if ((string)$config['outputMode'] === 'stream') {
 		if (!command_exists('ffmpeg')) {
 			return array('ok' => false, 'error' => 'ffmpeg is required for Stream output mode but was not found in PATH.');
+		}
+
+		if ($streamUsesRecorderStdoutPad && !command_exists('rms-cast-recorder')) {
+			return array('ok' => false, 'error' => 'rms-cast-recorder is required for stream input conditioning (--stdout-pad) but was not found in PATH.');
 		}
 	} elseif (!command_exists('rms-cast-recorder')) {
 		return array('ok' => false, 'error' => 'rms-cast-recorder is required for Recorder output mode but was not found in PATH.');
@@ -1534,7 +2068,15 @@ function start_instance(array $config, string $logDir): array
 	$logPath = $logDir . '/' . $logFileName;
 	$launchEntry = '[' . date('Y-m-d H:i:s') . '] [LAUNCH] ' . $pipelineCommandForLog . "\n";
 	file_put_contents($logPath, $launchEntry, FILE_APPEND | LOCK_EX);
-	$attemptDelays = array(900000, 1800000, 3000000);
+	$attemptDelays = is_array($attemptDelaysUs) && count($attemptDelaysUs) > 0
+		? $attemptDelaysUs
+		: array(900000, 1800000, 3000000);
+	$normalizedAttemptDelays = array();
+	foreach ($attemptDelays as $delayUs) {
+		$delay = max(0, (int)$delayUs);
+		$normalizedAttemptDelays[] = $delay;
+	}
+	$attemptDelays = $normalizedAttemptDelays;
 	$lastError = 'Failed to launch pipeline process.';
 	$pid = 0;
 
@@ -1562,7 +2104,7 @@ function start_instance(array $config, string $logDir): array
 		usleep($attemptDelays[$attempt]);
 	}
 
-	return array('ok' => false, 'error' => $lastError);
+	return array('ok' => false, 'error' => $lastError, 'logFile' => $logFileName, 'command' => $pipelineCommandForLog);
 }
 
 function list_instances(array $state): array
@@ -1570,11 +2112,15 @@ function list_instances(array $state): array
 	$instances = array();
 	foreach ($state as $device => $instance) {
 		$pid = isset($instance['pid']) ? (int)$instance['pid'] : 0;
+		$running = is_process_running($pid);
+		if (!$running) {
+			continue;
+		}
 		$config = isset($instance['config']) && is_array($instance['config']) ? $instance['config'] : array();
 		$instances[] = array(
 			'device' => (string)$device,
 			'pid' => $pid,
-			'running' => is_process_running($pid),
+			'running' => true,
 			'startedAt' => isset($instance['startedAt']) ? (int)$instance['startedAt'] : 0,
 			'logFile' => isset($instance['logFile']) ? (string)$instance['logFile'] : '',
 			'command' => isset($instance['command']) ? (string)$instance['command'] : '',
@@ -1983,7 +2529,39 @@ if (isset($_REQUEST['action'])) {
 
 if ($action !== '') {
 	$state = load_state($STATE_FILE);
-	cleanup_stale_instances($state);
+	$desiredState = load_desired_state($DESIRED_STATE_FILE);
+	$desiredStateChanged = false;
+
+	if ($action === 'stop') {
+		$preStopDeviceId = normalize_device_id($_POST['device'] ?? $_GET['device'] ?? ($jsonPayload['device'] ?? ''));
+		if ($preStopDeviceId !== '' && set_device_desired_running($desiredState, $preStopDeviceId, false)) {
+			$desiredStateChanged = true;
+		}
+	}
+
+	if ($action === 'stop_all') {
+		$devicesToStop = array_values(array_unique(array_merge(array_keys($state), array_keys($desiredState))));
+		foreach ($devicesToStop as $rawDeviceToStop) {
+			if (set_device_desired_running($desiredState, (string)$rawDeviceToStop, false)) {
+				$desiredStateChanged = true;
+			}
+		}
+	}
+
+	$skipCleanupForAction = $action === 'stop' || $action === 'stop_all';
+	$desiredStateChangedByCleanup = false;
+	$stateChangedByCleanup = false;
+	if (!$skipCleanupForAction) {
+		$stateChangedByCleanup = cleanup_stale_instances($state, $LOG_DIR, $desiredState, $desiredStateChangedByCleanup);
+		if ($stateChangedByCleanup) {
+			save_state($STATE_FILE, $state);
+			sync_ui_settings_with_running_state($UI_SETTINGS_FILE, $state);
+		}
+	}
+
+	if ($desiredStateChanged || $desiredStateChangedByCleanup) {
+		save_desired_state($DESIRED_STATE_FILE, $desiredState);
+	}
 
 	if ($action === 'stream_servers_get') {
 		$servers = load_streaming_servers($STREAMING_SERVERS_FILE);
@@ -2219,6 +2797,7 @@ if ($action !== '') {
 		if (is_array($jsonPayload) && count($jsonPayload) > 0) {
 			$payload = array_merge($payload, $jsonPayload);
 		}
+		$autoRecoveryEnabled = resolve_auto_recovery_enabled_from_payload((array)$payload);
 
 		try {
 			$config = normalize_config((array)$payload, $recordingsRoot);
@@ -2238,15 +2817,11 @@ if ($action !== '') {
 			send_json(array('ok' => false, 'error' => $startResult['error']), 500);
 		}
 
-		$state[$deviceId] = array(
-			'pid' => (int)$startResult['pid'],
-			'startedAt' => time(),
-			'logFile' => (string)$startResult['logFile'],
-			'command' => (string)$startResult['command'],
-			'config' => $config,
-		);
+		$state[$deviceId] = build_instance_state($config, $startResult, $autoRecoveryEnabled, 0);
+		set_device_desired_running($desiredState, $deviceId, true);
 
 		save_state($STATE_FILE, $state);
+		save_desired_state($DESIRED_STATE_FILE, $desiredState);
 		sync_ui_settings_with_running_state($UI_SETTINGS_FILE, $state);
 		send_json(array(
 			'ok' => true,
@@ -2612,6 +3187,16 @@ var refreshInstancesQueued = false;
 var refreshOpenLogsInFlightPromise = null;
 var refreshOpenLogsQueued = false;
 var refreshOpenLogsRenderRequested = false;
+var STANDARD_DCS_CODES = [
+	'023', '025', '026', '031', '032', '036', '043', '047', '051', '053', '054', '065', '071', '072', '073', '074',
+	'114', '115', '116', '122', '125', '131', '132', '134', '143', '145', '152', '155', '156', '162', '165', '172', '174',
+	'205', '212', '223', '225', '226', '243', '244', '245', '246', '251', '252', '255', '261', '263', '265', '266', '271', '274',
+	'306', '311', '315', '325', '331', '332', '343', '346', '351', '356', '364', '365', '371',
+	'411', '412', '413', '423', '431', '432', '445', '446', '452', '454', '455', '462', '464', '465', '466',
+	'503', '506', '516', '523', '526', '532', '546', '565',
+	'606', '612', '624', '627', '631', '632', '654', '662', '664',
+	'703', '712', '723', '731', '732', '734', '743', '754'
+];
 
 function setStatus(message, isError)
 {
@@ -3358,6 +3943,44 @@ function normalizeMountByFormat(mount, format)
 	return raw;
 }
 
+function normalizeClientDcsCode(value)
+{
+	var raw = String(value == null ? '' : value).trim().toUpperCase();
+	if (raw === '' || raw === 'OFF' || raw === 'NONE') {
+		return '';
+	}
+
+	var match = raw.match(/^D?([0-7]{1,3})(?:[NI])?$/i);
+	if (!match) {
+		return '';
+	}
+
+	var code = String(match[1]);
+	while (code.length < 3) {
+		code = '0' + code;
+	}
+
+	return code;
+}
+
+function buildDcsOptions(selectedCode)
+{
+	var selected = normalizeClientDcsCode(selectedCode);
+	var html = '<option value="">Off (No DCS)</option>';
+
+	if (selected !== '' && STANDARD_DCS_CODES.indexOf(selected) === -1) {
+		html += '<option value="' + escapeHtml(selected) + '" selected>D' + escapeHtml(selected) + 'N / D' + escapeHtml(selected) + 'I (Custom)</option>';
+	}
+
+	for (var i = 0; i < STANDARD_DCS_CODES.length; i++) {
+		var code = STANDARD_DCS_CODES[i];
+		var selectedAttr = code === selected ? ' selected' : '';
+		html += '<option value="' + code + '"' + selectedAttr + '>D' + code + 'N / D' + code + 'I</option>';
+	}
+
+	return html;
+}
+
 function buildStreamPlaybackUrl(config)
 {
 	var target = String(config.streamTarget || '').trim();
@@ -3551,6 +4174,7 @@ function sanitizeTemplateConfig(config)
 	delete clean.device;
 	delete clean.deviceSerial;
 	delete clean.outputDir;
+	clean.dcs = normalizeClientDcsCode(clean.dcs);
 	clean.streamFormat = String(clean.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
 	clean.streamMount = normalizeMountByFormat(clean.streamMount, clean.streamFormat);
 	return clean;
@@ -3565,6 +4189,7 @@ function applyTemplateToDevice(deviceId, templateName)
 	var current = getConfigForDevice(deviceId);
 	var merged = Object.assign({}, current, settingsTemplates[name]);
 	merged.device = String(deviceId);
+	merged.dcs = normalizeClientDcsCode(merged.dcs);
 	merged.streamFormat = String(merged.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
 	merged.streamMount = normalizeMountByFormat(merged.streamMount, merged.streamFormat);
 	var streamServerId = String(merged.streamServerId || '').trim();
@@ -3608,6 +4233,7 @@ function getDefaultConfig(deviceId)
 		rtlBandwidth: '12000',
 		squelch: '500',
 		gain: 'auto',
+		dcs: '',
 		biasT: '0',
 		threshold: '-40',
 		silence: '2',
@@ -4221,6 +4847,7 @@ function getConfigForDevice(deviceId)
 	merged.device = String(deviceId);
 	merged.rtlBandwidth = String(merged.rtlBandwidth || '12000');
 	merged.squelch = normalizeClientSquelchValue(merged.squelch);
+	merged.dcs = normalizeClientDcsCode(merged.dcs);
 	merged.outputMode = String(merged.outputMode || 'recorder').toLowerCase() === 'stream' ? 'stream' : 'recorder';
 	merged.streamFormat = String(merged.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
 	merged.streamBitrate = String(merged.streamBitrate || '128');
@@ -4404,6 +5031,11 @@ function renderDeviceList()
 		var antennaEditDisabledAttr = antennaSerial === '' ? ' disabled' : '';
 		var antennaEditTitleAttr = antennaSerial === '' ? ' title="Device serial unavailable"' : '';
 		var biasTEnabled = isBiasTEnabledValue(config.biasT);
+		var dcsCode = normalizeClientDcsCode(config.dcs);
+		var squelchMetaValue = String(config.squelch || '500');
+		if (dcsCode !== '') {
+			squelchMetaValue += ' / DCS ' + dcsCode;
+		}
 		if (String(config.streamName || '').trim() !== '') {
 			streamNameRow = '<div class="device-stream-name">' + escapeHtml(String(config.streamName || '')) + '</div>';
 		}
@@ -4442,7 +5074,7 @@ function renderDeviceList()
 					'<div class="meta-box"><span class="meta-label">Bandwidth</span><span class="meta-value">' + escapeHtml(String(config.rtlBandwidth || '12000') + ' Hz') + '</span></div>' +
 					'<div class="meta-box"><span class="meta-label">Bias-T</span><span class="meta-value">' + escapeHtml(biasTEnabled ? 'Enabled' : 'Disabled') + '</span></div>' +
 					'<div class="meta-box"><span class="meta-label">PID</span><span class="meta-value">' + escapeHtml(metaPid) + '</span></div>' +
-					'<div class="meta-box"><span class="meta-label">Squelch</span><span class="meta-value">' + escapeHtml(String(config.squelch || '500')) + '</span></div>' +
+					'<div class="meta-box"><span class="meta-label">Squelch</span><span class="meta-value">' + escapeHtml(squelchMetaValue) + '</span></div>' +
 					'<div class="meta-box full"><span class="meta-label">Log File</span><span class="meta-value">' + escapeHtml(metaLog) + '</span></div>' +
 				'</div>' +
 				'<div class="' + configPanelClass + '">' +
@@ -4463,6 +5095,9 @@ function renderDeviceList()
 					'<div class="form-row">' +
 						'<div><label>Squelch</label><input type="number" step="1" inputmode="numeric" class="field-squelch" value="' + escapeHtml(String(config.squelch || '500')) + '" placeholder="non-zero integer" title="Must be a non-zero integer"></div>' +
 						'<div><label>Gain</label><input type="text" class="field-gain" value="' + escapeHtml(String(config.gain || '')) + '" placeholder="auto or number"></div>' +
+					'</div>' +
+					'<div class="form-row single">' +
+						'<div><label>DCS Gate</label><select class="field-dcs">' + buildDcsOptions(String(config.dcs || '')) + '</select></div>' +
 					'</div>' +
 					'<div class="form-row single">' +
 						'<div><label>RTL Bandwidth</label><select class="field-rtl-bandwidth">' +
@@ -4676,6 +5311,9 @@ function readCardConfig(card)
 		}
 	}
 
+	var dcsField = card.querySelector('.field-dcs');
+	var dcsCode = dcsField ? normalizeClientDcsCode(dcsField.value) : '';
+
 	var afterRecordSelect = card.querySelector('.field-after-record-action');
 	var afterRecordAction = afterRecordSelect ? afterRecordSelect.value.trim() : 'none';
 	var postCommandArgField = card.querySelector('.field-post-command-arg');
@@ -4714,6 +5352,7 @@ function readCardConfig(card)
 		outputMode: card.querySelector('.field-output-mode').value.trim(),
 		squelch: normalizeClientSquelchValue(card.querySelector('.field-squelch').value),
 		gain: card.querySelector('.field-gain').value.trim(),
+		dcs: dcsCode,
 		biasT: card.querySelector('.field-bias-t').value.trim(),
 		threshold: card.querySelector('.field-threshold').value.trim(),
 		silence: card.querySelector('.field-silence').value.trim(),
@@ -4904,6 +5543,7 @@ function bindDeviceCard(card)
 	var modeSelect = card.querySelector('.field-mode');
 	var bandwidthSelect = card.querySelector('.field-rtl-bandwidth');
 	var biasTSelect = card.querySelector('.field-bias-t');
+	var dcsSelect = card.querySelector('.field-dcs');
 	var outputModeSelect = card.querySelector('.field-output-mode');
 	var streamFormatSelect = card.querySelector('.field-stream-format');
 	var afterRecordSelect = card.querySelector('.field-after-record-action');
@@ -4914,6 +5554,9 @@ function bindDeviceCard(card)
 	bandwidthSelect.value = String(storedConfig.rtlBandwidth || '12000');
 	if (biasTSelect) {
 		biasTSelect.value = isBiasTEnabledValue(storedConfig.biasT) ? '1' : '0';
+	}
+	if (dcsSelect) {
+		dcsSelect.value = normalizeClientDcsCode(storedConfig.dcs);
 	}
 	outputModeSelect.value = storedConfig.outputMode || 'recorder';
 	streamFormatSelect.value = storedConfig.streamFormat || 'mp3';

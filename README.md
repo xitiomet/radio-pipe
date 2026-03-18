@@ -159,11 +159,16 @@ $ ./scripts/rtl-fm-record.sh -f 462.550M -q 25 -R 12000 -o ./recordings
 $ ./scripts/rtl-fm-record.sh -f 462.550M -q 25 -D 023 -o ./recordings
 ```
 
+```bash
+$ ./scripts/rtl-fm-record.sh -f 462.550M -q 25 -C 100.0 -o ./recordings
+```
+
 Script options:
 
 * `-f,--frequency <freq>` – required frequency to tune
 * `-q,--squelch <level>` – rtl_fm squelch level (default 0)
 * `-D,--dcs <code>` – optional DCS gate code (octal, example `023`)
+* `-C,--ctcss <hz>` – optional CTCSS gate tone in Hz (example `100.0`)
 * `-R,--sample-rate <hz>` – sample rate for both rtl_fm and recorder (default 8000)
 * `-o,--out <dir>` – output recordings directory (default `./recordings`)
 * `-e,--exec <path>` – path/name of rms-cast-recorder executable
@@ -192,6 +197,7 @@ must contain "Source URL: http://xyz/abc.mp3" which will point to the original s
 * --stdout – write gated clips to stdout as WAV clip stream
 * --stdout-raw – write gated audio to stdout as raw PCM bytes
 * --stdout-pad – when stdout raw mode is enabled, emit silence while input stream stalls
+* --stdout-pad-delay <MS> – delay before stdout pad starts emitting silence (default `500`)
 * --stdout-rate <HZ> – raw stdout sample rate (default matches --sample-rate)
 * --stdout-channels <N> – raw stdout channels (default matches --channels)
 * --stdout-bits <BITS> – raw stdout bit depth (default matches --bitrate)
@@ -205,6 +211,7 @@ must contain "Source URL: http://xyz/abc.mp3" which will point to the original s
 * -c,--channels <N> – output channels (1 mono, 2 stereo; default 1)
 * -b,--bitrate <BITS> – output PCM bit depth in bits (default 16)
 * --dcs <CODE> – optional DCS gate code (octal, example `023`); clip audio only while matching DCS is detected
+* --ctcss <HZ> – optional CTCSS gate tone in Hz (example `100.0`); clip audio only while matching tone is detected
 * -n,--name <STREAM> – override stream name used in output filenames
 * -x,--on-write <PROGRAM> – optional script/program to run each time a WAV is
   written; if {wav} is omitted, the full WAV path is passed as argument 1
@@ -220,7 +227,13 @@ Raw stdout format flags (--stdout-rate, --stdout-channels, --stdout-bits, --stdo
 
 `--stdout-pad` requires raw stdout output (`--stdout-raw`) and emits timed silence while the input stream read is stalled.
 
+`--stdout-pad-delay` controls how long a stall must last before silence is emitted; default is `500` ms.
+
 When using --dcs, output PCM bit depth must be 16 (`--bitrate 16`).
+
+When using --ctcss, output PCM bit depth must be 16 (`--bitrate 16`).
+
+When using both --dcs and --ctcss, both gates must match for clips to open.
 
 When using --stdout without -o, recordings are not written to disk (stdout-only mode).
 

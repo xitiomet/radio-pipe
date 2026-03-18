@@ -48,7 +48,8 @@ public class StreamRecorder {
     private static final long PLL_PHASE_MASK = 0xFFFFFFFFL;
     private static final long PLL_PHASE_MIDPOINT = 0x80000000L;
     private static final long PLL_PHASE_WRAP = 0x1_0000_0000L;
-    private static final long STDOUT_PAD_POLL_MILLIS = 100L;
+    private static final long STDOUT_READ_POLL_MILLIS = 20L;
+    private static final long DEFAULT_STDOUT_PAD_DELAY_MILLIS = 500L;
     private final URL streamUrl;
     private final InputStream stdinInput;
     private final boolean stdinMode;
@@ -67,10 +68,13 @@ public class StreamRecorder {
     private volatile String streamLabel;
     private volatile Integer requiredDcsCode;
     private volatile String requiredDcsLabel;
+    private volatile Double requiredCtcssToneHz;
+    private volatile String requiredCtcssLabel;
     private volatile boolean stdoutEnabled;
     private volatile boolean stdoutRawMode;
     private volatile AudioFormat stdoutRawFormat;
     private volatile boolean stdoutPadMode;
+    private volatile long stdoutPadDelayMillis;
     private volatile boolean stdoutRawConversionWarned;
     private volatile boolean stdoutConfigLogged;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_DATE;
@@ -190,10 +194,13 @@ public class StreamRecorder {
         this.streamLabel = sanitizeStreamName(this.streamTitle);
         this.requiredDcsCode = null;
         this.requiredDcsLabel = null;
+        this.requiredCtcssToneHz = null;
+        this.requiredCtcssLabel = null;
         this.stdoutEnabled = false;
         this.stdoutRawMode = false;
         this.stdoutRawFormat = null;
         this.stdoutPadMode = false;
+        this.stdoutPadDelayMillis = DEFAULT_STDOUT_PAD_DELAY_MILLIS;
         this.stdoutRawConversionWarned = false;
         this.stdoutConfigLogged = false;
     }
@@ -216,12 +223,30 @@ public class StreamRecorder {
         this.requiredDcsLabel = formatDcsCode(dcsCode);
     }
 
-    public void setStdoutOutput(boolean enabled, boolean rawMode, AudioFormat rawFormat, boolean padMode) {
+    public void setRequiredCtcssTone(Double toneHz) {
+        if (toneHz == null) {
+            this.requiredCtcssToneHz = null;
+            this.requiredCtcssLabel = null;
+            return;
+        }
+        if (toneHz < 50.0 || toneHz > 300.0) {
+            throw new IllegalArgumentException("CTCSS tone must be between 50.0 and 300.0 Hz");
+        }
+        this.requiredCtcssToneHz = toneHz;
+        this.requiredCtcssLabel = formatCtcssTone(toneHz);
+    }
+
+    public void setStdoutOutput(boolean enabled,
+                                boolean rawMode,
+                                AudioFormat rawFormat,
+                                boolean padMode,
+                                long padDelayMillis) {
         if (!enabled) {
             this.stdoutEnabled = false;
             this.stdoutRawMode = false;
             this.stdoutRawFormat = null;
             this.stdoutPadMode = false;
+            this.stdoutPadDelayMillis = DEFAULT_STDOUT_PAD_DELAY_MILLIS;
             this.stdoutRawConversionWarned = false;
             this.stdoutConfigLogged = false;
             return;
@@ -235,6 +260,7 @@ public class StreamRecorder {
         this.stdoutRawMode = rawMode;
         this.stdoutRawFormat = rawMode ? rawFormat : null;
         this.stdoutPadMode = rawMode && padMode;
+        this.stdoutPadDelayMillis = Math.max(0L, padDelayMillis);
         this.stdoutRawConversionWarned = false;
         this.stdoutConfigLogged = false;
     }
@@ -358,6 +384,7 @@ public class StreamRecorder {
                                     silenceThresholdDb,
                                     silenceDurationSeconds));
                     logDcsConfiguration();
+                    logCtcssConfiguration();
                     logStdoutConfiguration(outputFormat);
                     processStream(converted, outputFormat);
                 }
@@ -373,6 +400,7 @@ public class StreamRecorder {
                                 silenceThresholdDb,
                                 silenceDurationSeconds));
                 logDcsConfiguration();
+                logCtcssConfiguration();
                 logStdoutConfiguration(decodedFormat);
                 processStream(din, decodedFormat);
             }
@@ -384,7 +412,9 @@ public class StreamRecorder {
         float frameRate = format.getFrameRate() > 0 ? format.getFrameRate() : format.getSampleRate();
         long framesForSilence = (long) (silenceDurationSeconds * frameRate);
         DcsDetector dcsDetector = (this.requiredDcsCode == null) ? null : new DcsDetector(format, this.requiredDcsCode);
+        CtcssDetector ctcssDetector = (this.requiredCtcssToneHz == null) ? null : new CtcssDetector(format, this.requiredCtcssToneHz);
         boolean dcsGateOpen = (dcsDetector == null);
+        boolean ctcssGateOpen = (ctcssDetector == null);
 
         byte[] buffer = new byte[frameSize * 1024];
         ByteArrayOutputStream chunk = new ByteArrayOutputStream();
@@ -393,7 +423,8 @@ public class StreamRecorder {
         long silentFrames = 0;
         long chunkStartTime = 0;
         boolean activelyRecording = false;
-        int padFramesPerTick = Math.max(1, (int) Math.round((STDOUT_PAD_POLL_MILLIS / 1000.0) * frameRate));
+        int padFramesPerTick = Math.max(1, (int) Math.round((STDOUT_READ_POLL_MILLIS / 1000.0) * frameRate));
+        long stalledMillis = 0L;
 
         BlockingQueue<StreamReadResult> readQueue = new LinkedBlockingQueue<>();
         Thread readerThread = new Thread(() -> {
@@ -418,7 +449,7 @@ public class StreamRecorder {
         while (running) {
             StreamReadResult readResult;
             try {
-                readResult = readQueue.poll(STDOUT_PAD_POLL_MILLIS, TimeUnit.MILLISECONDS);
+                readResult = readQueue.poll(STDOUT_READ_POLL_MILLIS, TimeUnit.MILLISECONDS);
             } catch (InterruptedException interruptedException) {
                 Thread.currentThread().interrupt();
                 break;
@@ -426,6 +457,11 @@ public class StreamRecorder {
 
             if (readResult == null) {
                 if (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode) {
+                    stalledMillis += STDOUT_READ_POLL_MILLIS;
+                    if (stalledMillis < this.stdoutPadDelayMillis) {
+                        continue;
+                    }
+
                     int padBytes = padFramesPerTick * frameSize;
                     byte[] padBuffer = new byte[padBytes];
                     writeStdoutRaw(padBuffer, padBytes, format);
@@ -464,6 +500,8 @@ public class StreamRecorder {
                 continue;
             }
 
+            stalledMillis = 0L;
+
             if (readResult.error != null) {
                 throw new IOException("Audio stream read failed", readResult.error);
             }
@@ -476,6 +514,7 @@ public class StreamRecorder {
             byte[] currentBuffer = readResult.data;
             boolean isSilent = isSilent(currentBuffer, n, format);
             boolean dcsMatch = (dcsDetector == null) || dcsDetector.consume(currentBuffer, n, format);
+            boolean ctcssMatch = (ctcssDetector == null) || ctcssDetector.consume(currentBuffer, n, format);
             if (dcsDetector != null && dcsMatch != dcsGateOpen) {
                 dcsGateOpen = dcsMatch;
                 if (dcsGateOpen) {
@@ -487,8 +526,18 @@ public class StreamRecorder {
                             "DCS " + this.requiredDcsLabel + " no longer detected, gate closed.");
                 }
             }
+            if (ctcssDetector != null && ctcssMatch != ctcssGateOpen) {
+                ctcssGateOpen = ctcssMatch;
+                if (ctcssGateOpen) {
+                    log("CTCSS", ANSI_GREEN,
+                            "CTCSS " + this.requiredCtcssLabel + " detected, gate open.");
+                } else {
+                    log("CTCSS", ANSI_YELLOW,
+                            "CTCSS " + this.requiredCtcssLabel + " no longer detected, gate closed.");
+                }
+            }
 
-            if (!isSilent && dcsMatch) {
+            if (!isSilent && dcsMatch && ctcssMatch) {
                 if (chunk.size() == 0) {
                     chunkStartTime = System.currentTimeMillis();
                     log("RECORD", ANSI_GREEN,
@@ -566,6 +615,16 @@ public class StreamRecorder {
                         + " (normal and inverted polarity, " + DCS_BITRATE + " bps). Clips open only on matching DCS.");
     }
 
+    private void logCtcssConfiguration() {
+        if (this.requiredCtcssToneHz == null) {
+            return;
+        }
+
+        log("CTCSS", ANSI_CYAN,
+                "CTCSS gate enabled for tone " + this.requiredCtcssLabel
+                        + " Hz. Clips open only on matching tone.");
+    }
+
     private void logStdoutConfiguration(AudioFormat activeFormat) {
         if (!this.stdoutEnabled || this.stdoutConfigLogged) {
             return;
@@ -577,7 +636,8 @@ public class StreamRecorder {
                     "stdout output enabled (raw PCM): " + describeAudioFormat(targetFormat));
             if (this.stdoutPadMode) {
                 log("STDOUT", ANSI_CYAN,
-                        "stdout pad enabled: emitting timed silence while waiting for stalled input.");
+                        "stdout pad enabled: emit silence only after input stalls for "
+                                + this.stdoutPadDelayMillis + " ms.");
             }
         } else {
             log("STDOUT", ANSI_CYAN,
@@ -1027,6 +1087,158 @@ public class StreamRecorder {
 
     private static String formatDcsCode(int dcsCode) {
         return String.format("%03o", dcsCode & 0x1FF);
+    }
+
+    private static String formatCtcssTone(double toneHz) {
+        return String.format("%.1f", toneHz);
+    }
+
+    private static final class CtcssDetector {
+        private static final double MIN_TONE_HZ = 50.0;
+        private static final double MAX_TONE_HZ = 300.0;
+        private static final double ANALYSIS_WINDOW_SECONDS = 0.2;
+        private static final int OPEN_MATCH_WINDOWS = 2;
+        private static final int CLOSE_MISS_WINDOWS = 3;
+        private static final double MIN_TARGET_AMPLITUDE = 0.0025;
+        private static final double DOMINANCE_RATIO = 1.6;
+        private static final double NEIGHBOR_OFFSET_HZ = 4.0;
+
+        private final double sampleRate;
+        private final double targetHz;
+        private final double lowerNeighborHz;
+        private final double upperNeighborHz;
+        private final int windowSamples;
+        private final double[] sampleWindow;
+        private int sampleIndex;
+        private int matchWindows;
+        private int missWindows;
+        private boolean detected;
+
+        private CtcssDetector(AudioFormat format, double targetHz) {
+            if (format.getSampleRate() <= 0) {
+                throw new IllegalArgumentException("Invalid sample rate for CTCSS detector");
+            }
+
+            this.sampleRate = format.getSampleRate();
+            this.targetHz = targetHz;
+            this.lowerNeighborHz = chooseLowerNeighbor(targetHz);
+            this.upperNeighborHz = chooseUpperNeighbor(targetHz);
+            this.windowSamples = Math.max(200, (int) Math.round(this.sampleRate * ANALYSIS_WINDOW_SECONDS));
+            this.sampleWindow = new double[this.windowSamples];
+            this.sampleIndex = 0;
+            this.matchWindows = 0;
+            this.missWindows = 0;
+            this.detected = false;
+        }
+
+        private static double chooseLowerNeighbor(double targetHz) {
+            double candidate = Math.max(MIN_TONE_HZ, targetHz - NEIGHBOR_OFFSET_HZ);
+            if (Math.abs(candidate - targetHz) < 0.001) {
+                candidate = Math.min(MAX_TONE_HZ, targetHz + (NEIGHBOR_OFFSET_HZ * 2.0));
+            }
+            return candidate;
+        }
+
+        private static double chooseUpperNeighbor(double targetHz) {
+            double candidate = Math.min(MAX_TONE_HZ, targetHz + NEIGHBOR_OFFSET_HZ);
+            if (Math.abs(candidate - targetHz) < 0.001) {
+                candidate = Math.max(MIN_TONE_HZ, targetHz - (NEIGHBOR_OFFSET_HZ * 2.0));
+            }
+            return candidate;
+        }
+
+        private boolean consume(byte[] data, int len, AudioFormat format) {
+            if (format.getSampleSizeInBits() != 16) {
+                return false;
+            }
+
+            int frameSize = format.getFrameSize();
+            int channels = format.getChannels();
+            boolean bigEndian = format.isBigEndian();
+            int frames = len / frameSize;
+            int offset = 0;
+
+            for (int i = 0; i < frames; i++) {
+                double mixedSample = 0.0;
+                for (int ch = 0; ch < channels; ch++) {
+                    int sample;
+                    if (bigEndian) {
+                        int hi = data[offset];
+                        int lo = data[offset + 1] & 0xff;
+                        sample = (hi << 8) | lo;
+                    } else {
+                        int lo = data[offset] & 0xff;
+                        int hi = data[offset + 1];
+                        sample = (hi << 8) | lo;
+                    }
+                    mixedSample += sample / 32768.0;
+                    offset += 2;
+                }
+
+                this.sampleWindow[this.sampleIndex++] = mixedSample / channels;
+                if (this.sampleIndex >= this.windowSamples) {
+                    analyzeWindow();
+                    this.sampleIndex = 0;
+                }
+            }
+
+            return this.detected;
+        }
+
+        private void analyzeWindow() {
+            double mean = 0.0;
+            for (int i = 0; i < this.windowSamples; i++) {
+                mean += this.sampleWindow[i];
+            }
+            mean /= this.windowSamples;
+
+            double targetAmp = goertzelAmplitude(this.sampleWindow, this.windowSamples, this.targetHz, this.sampleRate, mean);
+            double lowerAmp = goertzelAmplitude(this.sampleWindow, this.windowSamples, this.lowerNeighborHz, this.sampleRate, mean);
+            double upperAmp = goertzelAmplitude(this.sampleWindow, this.windowSamples, this.upperNeighborHz, this.sampleRate, mean);
+
+            boolean match = targetAmp >= MIN_TARGET_AMPLITUDE
+                    && targetAmp >= (lowerAmp * DOMINANCE_RATIO)
+                    && targetAmp >= (upperAmp * DOMINANCE_RATIO);
+
+            if (match) {
+                this.matchWindows++;
+                this.missWindows = 0;
+            } else {
+                this.missWindows++;
+                this.matchWindows = 0;
+            }
+
+            if (!this.detected && this.matchWindows >= OPEN_MATCH_WINDOWS) {
+                this.detected = true;
+            } else if (this.detected && this.missWindows >= CLOSE_MISS_WINDOWS) {
+                this.detected = false;
+            }
+        }
+
+        private static double goertzelAmplitude(double[] samples,
+                                                int sampleCount,
+                                                double targetHz,
+                                                double sampleRate,
+                                                double mean) {
+            double omega = (2.0 * Math.PI * targetHz) / sampleRate;
+            double coeff = 2.0 * Math.cos(omega);
+            double prev = 0.0;
+            double prev2 = 0.0;
+
+            for (int i = 0; i < sampleCount; i++) {
+                double centered = samples[i] - mean;
+                double next = centered + (coeff * prev) - prev2;
+                prev2 = prev;
+                prev = next;
+            }
+
+            double power = (prev2 * prev2) + (prev * prev) - (coeff * prev * prev2);
+            if (power < 0.0) {
+                power = 0.0;
+            }
+
+            return (2.0 * Math.sqrt(power)) / sampleCount;
+        }
     }
 
     private static boolean isValidGolayCodeword(int codeword) {

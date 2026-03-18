@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOF'
-Usage: ./scripts/rtl-fm-record.sh -f <frequency> [-q <squelch>] [-D <dcs>] [options]
+Usage: ./scripts/rtl-fm-record.sh -f <frequency> [-q <squelch>] [-D <dcs>] [-C <ctcss>] [options]
 
 Record from RTL-SDR via rtl_fm and pipe audio into rms-cast-recorder.
 
@@ -14,6 +14,7 @@ Required:
 Optional:
   -q, --squelch <level>    rtl_fm squelch level (default: 0)
 	-D, --dcs <code>         DCS gate code for recorder (octal, example: 023)
+	-C, --ctcss <hz>         CTCSS gate tone for recorder in Hz (example: 100.0)
   -R, --sample-rate <hz>   Sample rate for both rtl_fm and recorder stdin/output (default: 8000)
   -o, --out <dir>          Output directory for recordings (default: ./recordings)
   -e, --exec <path>        rms-cast-recorder executable (default: ./rms-cast-recorder)
@@ -33,6 +34,7 @@ EOF
 frequency=""
 squelch="0"
 dcs=""
+ctcss=""
 out_dir="./recordings"
 recorder_bin="rms-cast-recorder"
 mode="fm"
@@ -55,6 +57,10 @@ while [[ $# -gt 0 ]]; do
 			;;
 		-D|--dcs)
 			dcs="${2:-}"
+			shift 2
+			;;
+		-C|--ctcss)
+			ctcss="${2:-}"
 			shift 2
 			;;
 		-R|--sample-rate)
@@ -125,6 +131,17 @@ if [[ -n "$dcs" ]]; then
 	printf -v dcs "%03o" "$dcs_dec"
 fi
 
+if [[ -n "$ctcss" ]]; then
+	if ! [[ "$ctcss" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+		echo "Error: CTCSS tone must be numeric in Hz (example: 100.0)." >&2
+		exit 1
+	fi
+	if ! awk -v tone="$ctcss" 'BEGIN { exit !(tone >= 50.0 && tone <= 300.0) }'; then
+		echo "Error: CTCSS tone must be between 50.0 and 300.0 Hz." >&2
+		exit 1
+	fi
+fi
+
 if ! command -v rtl_fm >/dev/null 2>&1; then
 	echo "Error: rtl_fm is not installed or not in PATH." >&2
 	exit 1
@@ -184,11 +201,18 @@ if [[ -n "$dcs" ]]; then
 	rec_cmd+=( --dcs "$dcs" )
 fi
 
+if [[ -n "$ctcss" ]]; then
+	rec_cmd+=( --ctcss "$ctcss" )
+fi
+
 echo "Starting RTL-SDR recording"
 echo "  Frequency: $frequency"
 echo "  Squelch:   $squelch"
 if [[ -n "$dcs" ]]; then
 	echo "  DCS:       $dcs"
+fi
+if [[ -n "$ctcss" ]]; then
+	echo "  CTCSS:     ${ctcss} Hz"
 fi
 echo "  Rate:      ${sample_rate} Hz"
 echo "  Stream:    $stream_name"

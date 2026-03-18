@@ -41,6 +41,8 @@ public class RMSCastRecorderMain
             .desc("Write gated audio to stdout as raw PCM bytes").build());
         options.addOption(Option.builder().longOpt("stdout-pad")
             .desc("When stdout raw mode is enabled, emit silence while input stream stalls").build());
+        options.addOption(Option.builder().longOpt("stdout-pad-delay").hasArg().argName("MS")
+            .desc("Delay in milliseconds before stdout pad starts emitting silence (default 500)").build());
         options.addOption(Option.builder().longOpt("stdout-rate").hasArg().argName("HZ")
             .desc("Raw stdout sample rate in Hz (default matches --sample-rate)").build());
         options.addOption(Option.builder().longOpt("stdout-channels").hasArg().argName("N")
@@ -69,6 +71,8 @@ public class RMSCastRecorderMain
             .desc("Optional stream name override used in filenames (default comes from stream metadata)").build());
         options.addOption(Option.builder().longOpt("dcs").hasArg().argName("CODE")
             .desc("Optional DCS code gate (octal, e.g. 023); clips only while matching code is present").build());
+        options.addOption(Option.builder().longOpt("ctcss").hasArg().argName("HZ")
+            .desc("Optional CTCSS tone gate in Hz (example: 100.0); clips only while matching tone is present").build());
 
         try {
             cmd = parser.parse(options, args);
@@ -89,6 +93,7 @@ public class RMSCastRecorderMain
             boolean useStdout = cmd.hasOption("stdout");
             boolean stdoutRaw = cmd.hasOption("stdout-raw");
                 boolean stdoutPad = cmd.hasOption("stdout-pad");
+                long stdoutPadDelayMs = Long.parseLong(cmd.getOptionValue("stdout-pad-delay", "500"));
             boolean hasStdoutRawFormatFlags = cmd.hasOption("stdout-rate")
                     || cmd.hasOption("stdout-channels")
                     || cmd.hasOption("stdout-bits")
@@ -106,6 +111,12 @@ public class RMSCastRecorderMain
             {
                 useStdout = true;
                 stdoutRaw = true; // padding is only meaningful for raw byte stream output
+            }
+            if (cmd.hasOption("stdout-pad-delay"))
+            {
+                useStdout = true;
+                stdoutRaw = true;
+                stdoutPad = true;
             }
             if (hasUrl == useStdin) {
                 throw new ParseException("Specify exactly one input source: --url <URL> or --stdin");
@@ -132,6 +143,7 @@ public class RMSCastRecorderMain
             String onWriteProgram = cmd.getOptionValue("x");
             String streamNameOverride = cmd.getOptionValue("n");
             Integer dcsCode = cmd.hasOption("dcs") ? parseDcsCode(cmd.getOptionValue("dcs")) : null;
+            Double ctcssToneHz = cmd.hasOption("ctcss") ? parseCtcssTone(cmd.getOptionValue("ctcss")) : null;
             AudioFormat stdoutRawFormat = null;
 
             if (outputSampleRate <= 0) {
@@ -145,6 +157,12 @@ public class RMSCastRecorderMain
             }
             if (dcsCode != null && outputBitDepth != 16) {
                 throw new ParseException("--dcs requires 16-bit output PCM (use --bitrate 16)");
+            }
+            if (ctcssToneHz != null && outputBitDepth != 16) {
+                throw new ParseException("--ctcss requires 16-bit output PCM (use --bitrate 16)");
+            }
+            if (stdoutPadDelayMs < 0) {
+                throw new ParseException("stdout-pad-delay must be >= 0 milliseconds");
             }
             if (outDir == null && onWriteProgram != null) {
                 throw new ParseException("--on-write requires file recording; provide -o when using --stdout");
@@ -250,7 +268,10 @@ public class RMSCastRecorderMain
             if (dcsCode != null) {
                 recorder.setRequiredDcsCode(dcsCode);
             }
-            recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad);
+            if (ctcssToneHz != null) {
+                recorder.setRequiredCtcssTone(ctcssToneHz);
+            }
+            recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad, stdoutPadDelayMs);
             Runtime.getRuntime().addShutdownHook(new Thread(recorder::stop));
             recorder.run();
 
@@ -277,6 +298,26 @@ public class RMSCastRecorderMain
         int parsed = Integer.parseInt(normalized, 8);
         if (parsed < 0 || parsed > 0x1FF) {
             throw new ParseException("dcs code is out of range");
+        }
+
+        return parsed;
+    }
+
+    private static double parseCtcssTone(String toneValue) throws ParseException
+    {
+        if (toneValue == null || toneValue.trim().isEmpty()) {
+            throw new ParseException("ctcss tone is required when --ctcss is used");
+        }
+
+        final double parsed;
+        try {
+            parsed = Double.parseDouble(toneValue.trim());
+        } catch (NumberFormatException nfe) {
+            throw new ParseException("ctcss must be a numeric tone in Hz (example: 100.0)");
+        }
+
+        if (parsed < 50.0 || parsed > 300.0) {
+            throw new ParseException("ctcss tone must be between 50.0 and 300.0 Hz");
         }
 
         return parsed;
