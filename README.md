@@ -75,6 +75,17 @@ $ arecord -f S16_LE -c 1 -r 8000 -t raw - \
     --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
     -o ./recordings
 ```
+
+raw PCM stdout example (gate audio for another program):
+```bash
+$ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
+  | ./rms-cast-recorder --stdin --stdin-raw \
+    --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
+    --dcs 023 \
+    --stdout --stdout-raw --stdout-pad \
+    --stdout-rate 8000 --stdout-channels 1 --stdout-bits 16 \
+  | your-program-that-reads-raw-pcm
+```
 ## Sample Scripts
 
 The `scripts/` directory contains helper scripts for converting recorded WAV files to compressed formats. All scripts require `exiftool` (`sudo apt install -y libimage-exiftool-perl`) to preserve the stream title and comment metadata during conversion.
@@ -144,10 +155,15 @@ $ ./scripts/rtl-fm-record.sh -f 146.520M -q 20 -o ./recordings
 $ ./scripts/rtl-fm-record.sh -f 462.550M -q 25 -R 12000 -o ./recordings
 ```
 
+```bash
+$ ./scripts/rtl-fm-record.sh -f 462.550M -q 25 -D 023 -o ./recordings
+```
+
 Script options:
 
 * `-f,--frequency <freq>` – required frequency to tune
 * `-q,--squelch <level>` – rtl_fm squelch level (default 0)
+* `-D,--dcs <code>` – optional DCS gate code (octal, example `023`)
 * `-R,--sample-rate <hz>` – sample rate for both rtl_fm and recorder (default 8000)
 * `-o,--out <dir>` – output recordings directory (default `./recordings`)
 * `-e,--exec <path>` – path/name of rms-cast-recorder executable
@@ -173,13 +189,22 @@ must contain "Source URL: http://xyz/abc.mp3" which will point to the original s
 * --stdin-bits <BITS> – raw stdin bit depth (default matches --bitrate)
 * --stdin-big-endian – raw stdin byte order is big-endian (default little-endian)
 * --stdin-unsigned – raw stdin encoding is unsigned PCM (default signed PCM)
-* -o,--out <DIR> – base directory for recordings (default ./recordings)
+* --stdout – write gated clips to stdout as WAV clip stream
+* --stdout-raw – write gated audio to stdout as raw PCM bytes
+* --stdout-pad – when stdout raw mode is enabled, emit silence while input stream stalls
+* --stdout-rate <HZ> – raw stdout sample rate (default matches --sample-rate)
+* --stdout-channels <N> – raw stdout channels (default matches --channels)
+* --stdout-bits <BITS> – raw stdout bit depth (default matches --bitrate)
+* --stdout-big-endian – raw stdout byte order is big-endian (default little-endian)
+* --stdout-unsigned – raw stdout encoding is unsigned PCM (default signed PCM)
+* -o,--out <DIR> – base directory for recordings (default ./recordings; if --stdout is used without -o, file recording is disabled)
 * -t,--threshold <DB> – silence threshold in dB (default -50)
 * -s,--silence <SECONDS> – how long the signal must stay below threshold to
   end a clip (default 2)
 * -r,--sample-rate <HZ> – output sample rate in Hz (default 8000)
 * -c,--channels <N> – output channels (1 mono, 2 stereo; default 1)
 * -b,--bitrate <BITS> – output PCM bit depth in bits (default 16)
+* --dcs <CODE> – optional DCS gate code (octal, example `023`); clip audio only while matching DCS is detected
 * -n,--name <STREAM> – override stream name used in output filenames
 * -x,--on-write <PROGRAM> – optional script/program to run each time a WAV is
   written; if {wav} is omitted, the full WAV path is passed as argument 1
@@ -190,6 +215,16 @@ Exactly one input source is required: `--url` or `--stdin`.
 When using --stdin without --stdin-raw, provide a Java Sound readable stream format (WAV is recommended).
 
 Raw format flags (--stdin-rate, --stdin-channels, --stdin-bits, --stdin-big-endian, --stdin-unsigned) require --stdin-raw.
+
+Raw stdout format flags (--stdout-rate, --stdout-channels, --stdout-bits, --stdout-big-endian, --stdout-unsigned) require --stdout-raw.
+
+`--stdout-pad` requires raw stdout output (`--stdout-raw`) and emits timed silence while the input stream read is stalled.
+
+When using --dcs, output PCM bit depth must be 16 (`--bitrate 16`).
+
+When using --stdout without -o, recordings are not written to disk (stdout-only mode).
+
+`--on-write` requires file recording (`-o`) and is ignored in stdout-only mode.
 
 When recording from --url, filenames default to stream metadata (icy-name/x-audiocast-name/ice-name) unless --name is provided.
 

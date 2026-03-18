@@ -35,6 +35,22 @@ public class RMSCastRecorderMain
             .desc("Raw stdin byte order is big-endian (default little-endian)").build());
         options.addOption(Option.builder().longOpt("stdin-unsigned")
             .desc("Raw stdin samples are unsigned PCM (default signed PCM)").build());
+        options.addOption(Option.builder().longOpt("stdout")
+            .desc("Write gated clips to stdout (WAV clip stream by default)").build());
+        options.addOption(Option.builder().longOpt("stdout-raw")
+            .desc("Write gated audio to stdout as raw PCM bytes").build());
+        options.addOption(Option.builder().longOpt("stdout-pad")
+            .desc("When stdout raw mode is enabled, emit silence while input stream stalls").build());
+        options.addOption(Option.builder().longOpt("stdout-rate").hasArg().argName("HZ")
+            .desc("Raw stdout sample rate in Hz (default matches --sample-rate)").build());
+        options.addOption(Option.builder().longOpt("stdout-channels").hasArg().argName("N")
+            .desc("Raw stdout channel count (default matches --channels)").build());
+        options.addOption(Option.builder().longOpt("stdout-bits").hasArg().argName("BITS")
+            .desc("Raw stdout bit depth (default matches --bitrate)").build());
+        options.addOption(Option.builder().longOpt("stdout-big-endian")
+            .desc("Raw stdout byte order is big-endian (default little-endian)").build());
+        options.addOption(Option.builder().longOpt("stdout-unsigned")
+            .desc("Raw stdout samples are unsigned PCM (default signed PCM)").build());
         options.addOption(Option.builder("o").longOpt("out").hasArg().argName("DIR")
             .desc("Base directory where recordings will be stored (default=./recordings)").build());
         options.addOption(Option.builder("t").longOpt("threshold").hasArg().argName("DB")
@@ -51,6 +67,8 @@ public class RMSCastRecorderMain
             .desc("Optional hook command run after each WAV write; use {wav} placeholder or WAV is arg1 by default").build());
         options.addOption(Option.builder("n").longOpt("name").hasArg().argName("STREAM")
             .desc("Optional stream name override used in filenames (default comes from stream metadata)").build());
+        options.addOption(Option.builder().longOpt("dcs").hasArg().argName("CODE")
+            .desc("Optional DCS code gate (octal, e.g. 023); clips only while matching code is present").build());
 
         try {
             cmd = parser.parse(options, args);
@@ -68,9 +86,26 @@ public class RMSCastRecorderMain
                     || cmd.hasOption("stdin-bits")
                     || cmd.hasOption("stdin-big-endian")
                     || cmd.hasOption("stdin-unsigned");
+            boolean useStdout = cmd.hasOption("stdout");
+            boolean stdoutRaw = cmd.hasOption("stdout-raw");
+                boolean stdoutPad = cmd.hasOption("stdout-pad");
+            boolean hasStdoutRawFormatFlags = cmd.hasOption("stdout-rate")
+                    || cmd.hasOption("stdout-channels")
+                    || cmd.hasOption("stdout-bits")
+                    || cmd.hasOption("stdout-big-endian")
+                    || cmd.hasOption("stdout-unsigned");
             if (hasRawFormatFlags || stdinRaw)
             {
                 useStdin = true; // if any raw format flags are set, we require stdin input
+            }
+            if (hasStdoutRawFormatFlags || stdoutRaw)
+            {
+                useStdout = true; // stdout raw flags imply stdout output
+            }
+            if (stdoutPad)
+            {
+                useStdout = true;
+                stdoutRaw = true; // padding is only meaningful for raw byte stream output
             }
             if (hasUrl == useStdin) {
                 throw new ParseException("Specify exactly one input source: --url <URL> or --stdin");
@@ -78,10 +113,17 @@ public class RMSCastRecorderMain
             if (hasRawFormatFlags && !stdinRaw) {
                 stdinRaw = true; // if any raw format flags are set, we assume raw mode
             }
+            if (hasStdoutRawFormatFlags && !stdoutRaw) {
+                stdoutRaw = true; // if any stdout raw format flags are set, we assume stdout raw mode
+            }
 
             URL url = hasUrl ? new URL(cmd.getOptionValue("u")) : null;
-            Path outDir = Paths.get(cmd.getOptionValue("o", "./recordings"));
-            Files.createDirectories(outDir);
+            boolean hasOutDir = cmd.hasOption("o");
+            Path outDir = null;
+            if (!useStdout || hasOutDir) {
+                outDir = Paths.get(cmd.getOptionValue("o", "./recordings"));
+                Files.createDirectories(outDir);
+            }
             double threshold = Double.parseDouble(cmd.getOptionValue("t", "-50"));
             double silenceSeconds = Double.parseDouble(cmd.getOptionValue("s", "2"));
             float outputSampleRate = Float.parseFloat(cmd.getOptionValue("r", "8000"));
@@ -89,6 +131,8 @@ public class RMSCastRecorderMain
             int outputBitDepth = Integer.parseInt(cmd.getOptionValue("b", "16"));
             String onWriteProgram = cmd.getOptionValue("x");
             String streamNameOverride = cmd.getOptionValue("n");
+            Integer dcsCode = cmd.hasOption("dcs") ? parseDcsCode(cmd.getOptionValue("dcs")) : null;
+            AudioFormat stdoutRawFormat = null;
 
             if (outputSampleRate <= 0) {
                 throw new ParseException("sample-rate must be > 0");
@@ -98,6 +142,42 @@ public class RMSCastRecorderMain
             }
             if (outputBitDepth <= 0 || outputBitDepth % 8 != 0) {
                 throw new ParseException("bitrate must be a positive multiple of 8 (for PCM bit depth)");
+            }
+            if (dcsCode != null && outputBitDepth != 16) {
+                throw new ParseException("--dcs requires 16-bit output PCM (use --bitrate 16)");
+            }
+            if (outDir == null && onWriteProgram != null) {
+                throw new ParseException("--on-write requires file recording; provide -o when using --stdout");
+            }
+
+            if (stdoutRaw) {
+                float stdoutSampleRate = Float.parseFloat(cmd.getOptionValue("stdout-rate", String.valueOf(outputSampleRate)));
+                int stdoutChannels = Integer.parseInt(cmd.getOptionValue("stdout-channels", String.valueOf(outputChannels)));
+                int stdoutBitDepth = Integer.parseInt(cmd.getOptionValue("stdout-bits", String.valueOf(outputBitDepth)));
+                boolean stdoutBigEndian = cmd.hasOption("stdout-big-endian");
+                boolean stdoutUnsigned = cmd.hasOption("stdout-unsigned");
+
+                if (stdoutSampleRate <= 0) {
+                    throw new ParseException("stdout-rate must be > 0");
+                }
+                if (stdoutChannels <= 0) {
+                    throw new ParseException("stdout-channels must be > 0");
+                }
+                if (stdoutBitDepth <= 0 || stdoutBitDepth % 8 != 0) {
+                    throw new ParseException("stdout-bits must be a positive multiple of 8");
+                }
+
+                AudioFormat.Encoding stdoutEncoding = stdoutUnsigned
+                        ? AudioFormat.Encoding.PCM_UNSIGNED
+                        : AudioFormat.Encoding.PCM_SIGNED;
+                stdoutRawFormat = new AudioFormat(
+                        stdoutEncoding,
+                        stdoutSampleRate,
+                        stdoutBitDepth,
+                        stdoutChannels,
+                        stdoutChannels * (stdoutBitDepth / 8),
+                        stdoutSampleRate,
+                        stdoutBigEndian);
             }
 
             StreamRecorder recorder;
@@ -166,6 +246,11 @@ public class RMSCastRecorderMain
                         onWriteProgram,
                         streamNameOverride);
             }
+
+            if (dcsCode != null) {
+                recorder.setRequiredDcsCode(dcsCode);
+            }
+            recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad);
             Runtime.getRuntime().addShutdownHook(new Thread(recorder::stop));
             recorder.run();
 
@@ -177,6 +262,26 @@ public class RMSCastRecorderMain
             e.printStackTrace(System.err);
         }
     }
+
+    private static int parseDcsCode(String dcsValue) throws ParseException
+    {
+        if (dcsValue == null || dcsValue.trim().isEmpty()) {
+            throw new ParseException("dcs code is required when --dcs is used");
+        }
+
+        String normalized = dcsValue.trim();
+        if (!normalized.matches("[0-7]{1,3}")) {
+            throw new ParseException("dcs must be 1-3 octal digits (example: 023)");
+        }
+
+        int parsed = Integer.parseInt(normalized, 8);
+        if (parsed < 0 || parsed > 0x1FF) {
+            throw new ParseException("dcs code is out of range");
+        }
+
+        return parsed;
+    }
+
     public static void showHelp(Options options)
     {
         HelpFormatter formatter = new HelpFormatter();

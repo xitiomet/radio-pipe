@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOF'
-Usage: ./scripts/rtl-fm-record.sh -f <frequency> [-q <squelch>] [options]
+Usage: ./scripts/rtl-fm-record.sh -f <frequency> [-q <squelch>] [-D <dcs>] [options]
 
 Record from RTL-SDR via rtl_fm and pipe audio into rms-cast-recorder.
 
@@ -13,6 +13,7 @@ Required:
 
 Optional:
   -q, --squelch <level>    rtl_fm squelch level (default: 0)
+	-D, --dcs <code>         DCS gate code for recorder (octal, example: 023)
   -R, --sample-rate <hz>   Sample rate for both rtl_fm and recorder stdin/output (default: 8000)
   -o, --out <dir>          Output directory for recordings (default: ./recordings)
   -e, --exec <path>        rms-cast-recorder executable (default: ./rms-cast-recorder)
@@ -31,6 +32,7 @@ EOF
 
 frequency=""
 squelch="0"
+dcs=""
 out_dir="./recordings"
 recorder_bin="rms-cast-recorder"
 mode="fm"
@@ -49,6 +51,10 @@ while [[ $# -gt 0 ]]; do
 			;;
 		-q|--squelch)
 			squelch="${2:-}"
+			shift 2
+			;;
+		-D|--dcs)
+			dcs="${2:-}"
 			shift 2
 			;;
 		-R|--sample-rate)
@@ -110,6 +116,15 @@ if ! [[ "$sample_rate" =~ ^[0-9]+$ ]] || [[ "$sample_rate" -le 0 ]]; then
 	exit 1
 fi
 
+if [[ -n "$dcs" ]]; then
+	if ! [[ "$dcs" =~ ^[0-7]{1,3}$ ]]; then
+		echo "Error: DCS code must be 1-3 octal digits (example: 023)." >&2
+		exit 1
+	fi
+	dcs_dec=$((8#$dcs))
+	printf -v dcs "%03o" "$dcs_dec"
+fi
+
 if ! command -v rtl_fm >/dev/null 2>&1; then
 	echo "Error: rtl_fm is not installed or not in PATH." >&2
 	exit 1
@@ -165,9 +180,16 @@ if [[ -n "$on_write" ]]; then
 	rec_cmd+=( -x "$on_write" )
 fi
 
+if [[ -n "$dcs" ]]; then
+	rec_cmd+=( --dcs "$dcs" )
+fi
+
 echo "Starting RTL-SDR recording"
 echo "  Frequency: $frequency"
 echo "  Squelch:   $squelch"
+if [[ -n "$dcs" ]]; then
+	echo "  DCS:       $dcs"
+fi
 echo "  Rate:      ${sample_rate} Hz"
 echo "  Stream:    $stream_name"
 echo "  Output:    $out_dir"
