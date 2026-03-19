@@ -56,7 +56,8 @@ public class RadioPipeMain
         options.addOption(Option.builder().longOpt("stdout-unsigned")
             .desc("Raw stdout samples are unsigned PCM (default signed PCM)").build());
         options.addOption(Option.builder("o").longOpt("out").hasArg().argName("DIR")
-            .desc("Base directory where recordings will be stored (default=./recordings)").build());
+            .optionalArg(true)
+            .desc("Base directory where recordings will be stored (default=$RADIOPIPE_RECORDINGS or ./recordings)").build());
         options.addOption(Option.builder("t").longOpt("threshold").hasArg().argName("DB")
                 .desc("Silence threshold in dB (default -50)").build());
         options.addOption(Option.builder("s").longOpt("silence").hasArg().argName("SECONDS")
@@ -136,7 +137,11 @@ public class RadioPipeMain
             boolean hasOutDir = cmd.hasOption("o");
             Path outDir = null;
             if (!useStdout || hasOutDir) {
-                outDir = Paths.get(cmd.getOptionValue("o", "./recordings"));
+                String requestedOutDir = cmd.getOptionValue("o");
+                String resolvedOutDir = !isBlank(requestedOutDir)
+                        ? requestedOutDir
+                        : resolveDefaultRecordingsDirectory();
+                outDir = Paths.get(resolvedOutDir);
                 Files.createDirectories(outDir);
             }
             double threshold = Double.parseDouble(cmd.getOptionValue("t", "-50"));
@@ -345,6 +350,20 @@ public class RadioPipeMain
         }
 
         return parsed;
+    }
+
+    private static String resolveDefaultRecordingsDirectory()
+    {
+        String envOutDir = System.getenv("RADIOPIPE_RECORDINGS");
+        if (!isBlank(envOutDir)) {
+            return envOutDir.trim();
+        }
+        return "./recordings";
+    }
+
+    private static boolean isBlank(String value)
+    {
+        return value == null || value.trim().isEmpty();
     }
 
     public static void showHelp(Options options)

@@ -292,7 +292,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * --stdout-bits <BITS> – raw stdout bit depth (default matches --bitrate)
 * --stdout-big-endian – raw stdout byte order is big-endian (default little-endian)
 * --stdout-unsigned – raw stdout encoding is unsigned PCM (default signed PCM)
-* -o,--out <DIR> – base directory for recordings (default ./recordings; if --stdout is used without -o, file recording is disabled)
+* -o,--out [DIR] – base directory for recordings (default `$RADIOPIPE_RECORDINGS` or `./recordings`; if `--stdout` is used without `-o`, file recording is disabled)
 * -t,--threshold <DB> – silence threshold in dB (default -50)
 * -s,--silence <SECONDS> – how long the signal must stay below threshold to
   end a clip (default 2)
@@ -330,6 +330,36 @@ When using both --dcs and --ctcss, both gates must match for clips to open.
 `--gate-hold` adds extra hold time after DCS/CTCSS detection loss to prevent brief weak/noisy decode dropouts from closing the gate immediately (default `1` second).
 
 When using --stdout without -o, recordings are not written to disk (stdout-only mode).
+
+If `RADIOPIPE_RECORDINGS` is set (and non-empty), it is used as the default recordings directory whenever file recording is enabled and `-o` does not provide a path (including bare `-o`).
+
+Examples for `RADIOPIPE_RECORDINGS`:
+
+Linux/macOS (bash):
+
+```bash
+export RADIOPIPE_RECORDINGS=/mnt/Media/recordings
+./radio-pipe --url http://example.com/stream.mp3
+./radio-pipe --url http://example.com/stream.mp3 --stdout -o
+```
+
+Windows PowerShell:
+
+```powershell
+$env:RADIOPIPE_RECORDINGS = 'D:\Recordings'
+.\radio-pipe.exe --url http://example.com/stream.mp3
+.\radio-pipe.exe --url http://example.com/stream.mp3 --stdout -o
+```
+
+Windows Command Prompt (cmd.exe):
+
+```bat
+set RADIOPIPE_RECORDINGS=D:\Recordings
+radio-pipe.exe --url http://example.com/stream.mp3
+radio-pipe.exe --url http://example.com/stream.mp3 --stdout -o
+```
+
+`--stdout` by itself remains stdout-only (no disk writes); adding bare `-o` enables file recording using `$RADIOPIPE_RECORDINGS` (or `./recordings` when unset).
 
 `--on-write` requires file recording (`-o`) and is ignored in stdout-only mode.
 
