@@ -194,6 +194,7 @@ must contain "Source URL: http://xyz/abc.mp3" which will point to the original s
 * --stdin-bits <BITS> – raw stdin bit depth (default matches --bitrate)
 * --stdin-big-endian – raw stdin byte order is big-endian (default little-endian)
 * --stdin-unsigned – raw stdin encoding is unsigned PCM (default signed PCM)
+* --input-dejitter <MS> – input de-jitter buffer depth for bursty piped input (default `250`)
 * --stdout – write gated clips to stdout as WAV clip stream
 * --stdout-raw – write gated audio to stdout as raw PCM bytes
 * --stdout-pad – when stdout raw mode is enabled, output a continuous gapless stream (gated audio + silence padding); no halt at startup or mid-stream stall
@@ -212,6 +213,7 @@ must contain "Source URL: http://xyz/abc.mp3" which will point to the original s
 * -b,--bitrate <BITS> – output PCM bit depth in bits (default 16)
 * --dcs <CODE> – optional DCS gate code (octal, example `023`); clip audio only while matching DCS is detected
 * --ctcss <HZ> – optional CTCSS gate tone in Hz (example `100.0`); clip audio only while matching tone is detected
+* --gate-hold <SECONDS> – additional grace time to keep DCS/CTCSS gates open after decode drops (default `1`)
 * -n,--name <STREAM> – override stream name used in output filenames
 * -x,--on-write <PROGRAM> – optional script/program to run each time a WAV is
   written; if {wav} is omitted, the full WAV path is passed as argument 1
@@ -222,6 +224,8 @@ Exactly one input source is required: `--url` or `--stdin`.
 When using --stdin without --stdin-raw, provide a Java Sound readable stream format (WAV is recommended).
 
 Raw format flags (--stdin-rate, --stdin-channels, --stdin-bits, --stdin-big-endian, --stdin-unsigned) require --stdin-raw.
+
+`--input-dejitter` adds an input-side jitter buffer so short producer timing gaps (for example, some RTL-SDR pipe bursts) do not immediately create choppy downstream output.
 
 Raw stdout format flags (--stdout-rate, --stdout-channels, --stdout-bits, --stdout-big-endian, --stdout-unsigned) require --stdout-raw.
 
@@ -234,6 +238,8 @@ When using --dcs, output PCM bit depth must be 16 (`--bitrate 16`).
 When using --ctcss, output PCM bit depth must be 16 (`--bitrate 16`).
 
 When using both --dcs and --ctcss, both gates must match for clips to open.
+
+`--gate-hold` adds extra hold time after DCS/CTCSS detection loss to prevent brief weak/noisy decode dropouts from closing the gate immediately (default `1` second).
 
 When using --stdout without -o, recordings are not written to disk (stdout-only mode).
 

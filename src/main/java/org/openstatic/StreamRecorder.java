@@ -51,6 +51,7 @@ public class StreamRecorder {
     private static final long PLL_PHASE_WRAP = 0x1_0000_0000L;
     private static final long STDOUT_READ_POLL_MILLIS = 20L;
     private static final long DEFAULT_STDOUT_PAD_DELAY_MILLIS = 500L;
+    private static final long DEFAULT_INPUT_DEJITTER_MILLIS = 250L;
     private final URL streamUrl;
     private final InputStream stdinInput;
     private final boolean stdinMode;
@@ -71,6 +72,8 @@ public class StreamRecorder {
     private volatile String requiredDcsLabel;
     private volatile Double requiredCtcssToneHz;
     private volatile String requiredCtcssLabel;
+    private volatile long inputDejitterMillis;
+    private volatile double gateHoldSeconds;
     private volatile boolean stdoutEnabled;
     private volatile boolean stdoutRawMode;
     private volatile AudioFormat stdoutRawFormat;
@@ -197,6 +200,8 @@ public class StreamRecorder {
         this.requiredDcsLabel = null;
         this.requiredCtcssToneHz = null;
         this.requiredCtcssLabel = null;
+        this.inputDejitterMillis = DEFAULT_INPUT_DEJITTER_MILLIS;
+        this.gateHoldSeconds = 1.0;
         this.stdoutEnabled = false;
         this.stdoutRawMode = false;
         this.stdoutRawFormat = null;
@@ -235,6 +240,20 @@ public class StreamRecorder {
         }
         this.requiredCtcssToneHz = toneHz;
         this.requiredCtcssLabel = formatCtcssTone(toneHz);
+    }
+
+    public void setGateHoldSeconds(double gateHoldSeconds) {
+        if (gateHoldSeconds < 0.0) {
+            throw new IllegalArgumentException("gate hold must be >= 0 seconds");
+        }
+        this.gateHoldSeconds = gateHoldSeconds;
+    }
+
+    public void setInputDejitterMillis(long inputDejitterMillis) {
+        if (inputDejitterMillis < 0L) {
+            throw new IllegalArgumentException("input de-jitter must be >= 0 milliseconds");
+        }
+        this.inputDejitterMillis = inputDejitterMillis;
     }
 
     public void setStdoutOutput(boolean enabled,
@@ -416,15 +435,33 @@ public class StreamRecorder {
         CtcssDetector ctcssDetector = (this.requiredCtcssToneHz == null) ? null : new CtcssDetector(format, this.requiredCtcssToneHz);
         boolean dcsGateOpen = (dcsDetector == null);
         boolean ctcssGateOpen = (ctcssDetector == null);
+        long gateHoldNanos = (this.gateHoldSeconds <= 0.0)
+            ? 0L
+            : Math.max(1L, Math.round(this.gateHoldSeconds * 1_000_000_000.0));
+        long dcsGateHoldUntilNanos = Long.MIN_VALUE;
+        long ctcssGateHoldUntilNanos = Long.MIN_VALUE;
 
-        byte[] buffer = new byte[frameSize * 1024];
+        int padFramesPerTick = Math.max(1, (int) Math.round((STDOUT_READ_POLL_MILLIS / 1000.0) * frameRate));
+        int ioChunkBytes = Math.max(frameSize, padFramesPerTick * frameSize);
+        byte[] readBuffer = new byte[ioChunkBytes];
         ByteArrayOutputStream chunk = new ByteArrayOutputStream();
         long recordedFrames = 0;
         long soundFrames = 0;
         long silentFrames = 0;
         long chunkStartTime = 0;
         boolean activelyRecording = false;
-        int padFramesPerTick = Math.max(1, (int) Math.round((STDOUT_READ_POLL_MILLIS / 1000.0) * frameRate));
+
+        long inputDejitterTargetBytes = Math.round((this.inputDejitterMillis / 1000.0) * frameRate) * frameSize;
+        if (this.inputDejitterMillis > 0L) {
+            inputDejitterTargetBytes = Math.max(ioChunkBytes, inputDejitterTargetBytes);
+            log("INPUT", ANSI_CYAN,
+                    "Input de-jitter buffer enabled: " + this.inputDejitterMillis + " ms.");
+        }
+        ArrayDeque<byte[]> inputDejitterBuffer = new ArrayDeque<>();
+        long inputDejitterBufferedBytes = 0L;
+        boolean inputDejitterPrimed = (inputDejitterTargetBytes <= 0L);
+        boolean inputEndOfStream = false;
+
         // Delay buffer for stdout pad mode: pre-filled with silence so output is always continuous
         ArrayDeque<byte[]> stdoutPadBuffer = new ArrayDeque<>();
         if (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode) {
@@ -438,8 +475,8 @@ public class StreamRecorder {
         Thread readerThread = new Thread(() -> {
             try {
                 int n;
-                while (running && (n = din.read(buffer)) != -1) {
-                    byte[] copy = Arrays.copyOf(buffer, n);
+                while (running && (n = din.read(readBuffer)) != -1) {
+                    byte[] copy = Arrays.copyOf(readBuffer, n);
                     readQueue.put(StreamReadResult.data(copy, n));
                 }
                 readQueue.put(StreamReadResult.eof());
@@ -457,26 +494,61 @@ public class StreamRecorder {
         while (running) {
             StreamReadResult readResult;
             try {
-                readResult = readQueue.poll(STDOUT_READ_POLL_MILLIS, TimeUnit.MILLISECONDS);
+                if (inputEndOfStream) {
+                    readResult = readQueue.poll();
+                } else {
+                    readResult = readQueue.poll(STDOUT_READ_POLL_MILLIS, TimeUnit.MILLISECONDS);
+                }
             } catch (InterruptedException interruptedException) {
                 Thread.currentThread().interrupt();
                 break;
             }
 
-            boolean noAudioData = (readResult == null);
-            if (readResult != null && readResult.error != null) {
-                throw new IOException("Audio stream read failed", readResult.error);
+            if (readResult != null) {
+                if (readResult.error != null) {
+                    throw new IOException("Audio stream read failed", readResult.error);
+                }
+                if (readResult.endOfStream) {
+                    inputEndOfStream = true;
+                } else if (readResult.data != null && readResult.length > 0) {
+                    inputDejitterBuffer.addLast(readResult.data);
+                    inputDejitterBufferedBytes += readResult.length;
+                }
             }
 
-            if (readResult != null && readResult.endOfStream) {
-                break;
+            while (!inputEndOfStream && (readResult = readQueue.poll()) != null) {
+                if (readResult.error != null) {
+                    throw new IOException("Audio stream read failed", readResult.error);
+                }
+                if (readResult.endOfStream) {
+                    inputEndOfStream = true;
+                    break;
+                }
+                if (readResult.data != null && readResult.length > 0) {
+                    inputDejitterBuffer.addLast(readResult.data);
+                    inputDejitterBufferedBytes += readResult.length;
+                }
             }
 
-            if (readResult != null && (readResult.data == null || readResult.length <= 0)) {
-                noAudioData = true;
+            if (!inputDejitterPrimed && (inputDejitterBufferedBytes >= inputDejitterTargetBytes
+                    || (inputEndOfStream && inputDejitterBufferedBytes > 0))) {
+                inputDejitterPrimed = true;
+            }
+
+            boolean noAudioData = true;
+            byte[] currentBuffer = null;
+            int n = 0;
+            if (inputDejitterPrimed && !inputDejitterBuffer.isEmpty()) {
+                currentBuffer = inputDejitterBuffer.removeFirst();
+                n = currentBuffer.length;
+                inputDejitterBufferedBytes -= n;
+                noAudioData = false;
             }
 
             if (noAudioData) {
+                if (inputEndOfStream) {
+                    break;
+                }
                 if (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode) {
                     int padBytes = padFramesPerTick * frameSize;
                     byte[] padSilence = new byte[padBytes];
@@ -517,11 +589,28 @@ public class StreamRecorder {
                 continue;
             }
 
-            int n = readResult.length;
-            byte[] currentBuffer = readResult.data;
             boolean isSilent = isSilent(currentBuffer, n, format);
-            boolean dcsMatch = (dcsDetector == null) || dcsDetector.consume(currentBuffer, n, format);
-            boolean ctcssMatch = (ctcssDetector == null) || ctcssDetector.consume(currentBuffer, n, format);
+            long nowNanos = System.nanoTime();
+
+            boolean dcsRawMatch = (dcsDetector == null) || dcsDetector.consume(currentBuffer, n, format);
+            if (dcsDetector != null && dcsRawMatch && gateHoldNanos > 0L) {
+                long holdUntil = nowNanos + gateHoldNanos;
+                dcsGateHoldUntilNanos = (holdUntil < 0L) ? Long.MAX_VALUE : holdUntil;
+            }
+            boolean dcsMatch = dcsRawMatch;
+            if (!dcsMatch && dcsDetector != null && gateHoldNanos > 0L && nowNanos <= dcsGateHoldUntilNanos) {
+                dcsMatch = true;
+            }
+
+            boolean ctcssRawMatch = (ctcssDetector == null) || ctcssDetector.consume(currentBuffer, n, format);
+            if (ctcssDetector != null && ctcssRawMatch && gateHoldNanos > 0L) {
+                long holdUntil = nowNanos + gateHoldNanos;
+                ctcssGateHoldUntilNanos = (holdUntil < 0L) ? Long.MAX_VALUE : holdUntil;
+            }
+            boolean ctcssMatch = ctcssRawMatch;
+            if (!ctcssMatch && ctcssDetector != null && gateHoldNanos > 0L && nowNanos <= ctcssGateHoldUntilNanos) {
+                ctcssMatch = true;
+            }
             if (dcsDetector != null && dcsMatch != dcsGateOpen) {
                 dcsGateOpen = dcsMatch;
                 if (dcsGateOpen) {
@@ -544,21 +633,27 @@ public class StreamRecorder {
                 }
             }
 
-            if (!isSilent && dcsMatch && ctcssMatch) {
+            boolean gateAllowsAudio = !isSilent && dcsMatch && ctcssMatch;
+            boolean includeFrameInClip = gateAllowsAudio || activelyRecording;
+            if (this.stdoutEnabled && this.stdoutRawMode) {
+                if (this.stdoutPadMode) {
+                    byte[] stdoutFrame = includeFrameInClip
+                            ? Arrays.copyOf(currentBuffer, n)
+                            : new byte[n];
+                    stdoutPadBuffer.addLast(stdoutFrame);
+                    drainStdoutPadBuffer(stdoutPadBuffer, n, format);
+                } else if (includeFrameInClip) {
+                    writeStdoutRaw(currentBuffer, n, format);
+                }
+            }
+
+            if (gateAllowsAudio) {
                 if (chunk.size() == 0) {
                     chunkStartTime = System.currentTimeMillis();
                     log("RECORD", ANSI_GREEN,
                             "Audio detected, starting clip for stream " + streamLabel + ".");
                 }
                 chunk.write(currentBuffer, 0, n);
-                if (this.stdoutEnabled && this.stdoutRawMode) {
-                    if (this.stdoutPadMode) {
-                        stdoutPadBuffer.addLast(Arrays.copyOf(currentBuffer, n));
-                        drainStdoutPadBuffer(stdoutPadBuffer, n, format);
-                    } else {
-                        writeStdoutRaw(currentBuffer, n, format);
-                    }
-                }
                 recordedFrames += n / frameSize;
                 soundFrames += n / frameSize;
                 silentFrames = 0;
@@ -566,14 +661,6 @@ public class StreamRecorder {
             } else {
                 if (activelyRecording) {
                     chunk.write(currentBuffer, 0, n);
-                    if (this.stdoutEnabled && this.stdoutRawMode) {
-                        if (this.stdoutPadMode) {
-                            stdoutPadBuffer.addLast(Arrays.copyOf(currentBuffer, n));
-                            drainStdoutPadBuffer(stdoutPadBuffer, n, format);
-                        } else {
-                            writeStdoutRaw(currentBuffer, n, format);
-                        }
-                    }
                     recordedFrames += n / frameSize;
                 }
                 silentFrames += n / frameSize;
@@ -627,9 +714,12 @@ public class StreamRecorder {
             return;
         }
 
-        log("DCS", ANSI_CYAN,
-                "DCS gate enabled for code " + this.requiredDcsLabel
-                        + " (normal and inverted polarity, " + DCS_BITRATE + " bps). Clips open only on matching DCS.");
+        String message = "DCS gate enabled for code " + this.requiredDcsLabel
+                + " (normal and inverted polarity, " + DCS_BITRATE + " bps). Clips open only on matching DCS.";
+        if (this.gateHoldSeconds > 0.0) {
+            message += String.format(" Gate hold adds %.3f s of grace after decode drop.", this.gateHoldSeconds);
+        }
+        log("DCS", ANSI_CYAN, message);
     }
 
     private void logCtcssConfiguration() {
@@ -637,9 +727,12 @@ public class StreamRecorder {
             return;
         }
 
-        log("CTCSS", ANSI_CYAN,
-                "CTCSS gate enabled for tone " + this.requiredCtcssLabel
-                        + " Hz. Clips open only on matching tone.");
+        String message = "CTCSS gate enabled for tone " + this.requiredCtcssLabel
+                + " Hz. Clips open only on matching tone.";
+        if (this.gateHoldSeconds > 0.0) {
+            message += String.format(" Gate hold adds %.3f s of grace after decode drop.", this.gateHoldSeconds);
+        }
+        log("CTCSS", ANSI_CYAN, message);
     }
 
     private void logStdoutConfiguration(AudioFormat activeFormat) {

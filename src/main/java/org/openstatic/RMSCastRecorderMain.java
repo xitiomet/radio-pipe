@@ -35,6 +35,8 @@ public class RMSCastRecorderMain
             .desc("Raw stdin byte order is big-endian (default little-endian)").build());
         options.addOption(Option.builder().longOpt("stdin-unsigned")
             .desc("Raw stdin samples are unsigned PCM (default signed PCM)").build());
+        options.addOption(Option.builder().longOpt("input-dejitter").hasArg().argName("MS")
+            .desc("Input de-jitter buffer in milliseconds to smooth bursty piped input (default 250)").build());
         options.addOption(Option.builder().longOpt("stdout")
             .desc("Write gated clips to stdout (WAV clip stream by default)").build());
         options.addOption(Option.builder().longOpt("stdout-raw")
@@ -73,6 +75,8 @@ public class RMSCastRecorderMain
             .desc("Optional DCS code gate (octal, e.g. 023); clips only while matching code is present").build());
         options.addOption(Option.builder().longOpt("ctcss").hasArg().argName("HZ")
             .desc("Optional CTCSS tone gate in Hz (example: 100.0); clips only while matching tone is present").build());
+        options.addOption(Option.builder().longOpt("gate-hold").hasArg().argName("SECONDS")
+            .desc("Hold DCS/CTCSS gates open for this many seconds after detection drops (default 1)").build());
 
         try {
             cmd = parser.parse(options, args);
@@ -144,6 +148,18 @@ public class RMSCastRecorderMain
             String streamNameOverride = cmd.getOptionValue("n");
             Integer dcsCode = cmd.hasOption("dcs") ? parseDcsCode(cmd.getOptionValue("dcs")) : null;
             Double ctcssToneHz = cmd.hasOption("ctcss") ? parseCtcssTone(cmd.getOptionValue("ctcss")) : null;
+            long inputDejitterMs;
+            try {
+                inputDejitterMs = Long.parseLong(cmd.getOptionValue("input-dejitter", "250"));
+            } catch (NumberFormatException nfe) {
+                throw new ParseException("input-dejitter must be an integer number of milliseconds");
+            }
+            double gateHoldSeconds;
+            try {
+                gateHoldSeconds = Double.parseDouble(cmd.getOptionValue("gate-hold", "1"));
+            } catch (NumberFormatException nfe) {
+                throw new ParseException("gate-hold must be a numeric value in seconds");
+            }
             AudioFormat stdoutRawFormat = null;
 
             if (outputSampleRate <= 0) {
@@ -160,6 +176,12 @@ public class RMSCastRecorderMain
             }
             if (ctcssToneHz != null && outputBitDepth != 16) {
                 throw new ParseException("--ctcss requires 16-bit output PCM (use --bitrate 16)");
+            }
+            if (inputDejitterMs < 0) {
+                throw new ParseException("input-dejitter must be >= 0 milliseconds");
+            }
+            if (gateHoldSeconds < 0) {
+                throw new ParseException("gate-hold must be >= 0 seconds");
             }
             if (stdoutPadDelayMs < 0) {
                 throw new ParseException("stdout-pad-delay must be >= 0 milliseconds");
@@ -271,6 +293,8 @@ public class RMSCastRecorderMain
             if (ctcssToneHz != null) {
                 recorder.setRequiredCtcssTone(ctcssToneHz);
             }
+            recorder.setInputDejitterMillis(inputDejitterMs);
+            recorder.setGateHoldSeconds(gateHoldSeconds);
             recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad, stdoutPadDelayMs);
             Runtime.getRuntime().addShutdownHook(new Thread(recorder::stop));
             recorder.run();
