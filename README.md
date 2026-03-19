@@ -1,14 +1,22 @@
 ## RMSCastRecorder
 
-A tool for recording Ham/CB/GRMS Radio related shoutcast or icecast internet streams. This tool will listen to a stream and only record when there is audio (root-mean-square activation) it will also accept audio from stdin so you can pipe from your soundcard, maybe a digirig connected to a radio or another source.
+RMSCastRecorder is a lightweight command-line recorder for Ham, CB, and GMRS radio streams delivered over Shoutcast or Icecast. It monitors incoming audio and only records when signal is present using root-mean-square (RMS) activation, so you capture actual transmissions instead of long stretches of silence. It can also read audio from stdin, making it easy to pipe in soundcard input, a DigiRig feed, or any other audio source.
 
-I found myself wishing i had an easy straightfoward way to record a stream without the long silences between transmissions. RMSCastRecorder will organize the produced wav files into folders by date, and the filename will include the stream title and timestamp.
-You can even run multiple instances pointed to the same output directory and as long as the stream names are different there should be
-no conflicts.
+Built for unattended logging, RMSCastRecorder stores WAV clips in date-based folders and names each file with the stream title and timestamp for quick browsing. You can run multiple instances to the same output directory without conflicts as long as each stream name is unique.
 
-Example output with -o ./recordings
+## Feature Overview
 
-A recording will be created as follows:
+* Records only active audio (RMS gating) to avoid silence-heavy files
+* Accepts stream URLs (`--url`) or piped audio (`--stdin`, including raw PCM)
+* Supports optional DCS/CTCSS gating for tone/code-controlled recording
+* Can emit gated audio to stdout as WAV clips or raw PCM (`--stdout` / `--stdout-raw`)
+* Writes date-organized clips with stream metadata and timestamped filenames
+* Supports post-write automation hooks (`--on-write`) for conversion/upload workflows
+* Includes PHP tools for browsing recordings and managing RTL-SDR pipelines
+
+### Example output (`-o ./recordings`)
+
+A recording path will look like:
 
 `./recordings/2026-03-12/2026-03-12_024630_RadPi.wav`
 
@@ -16,35 +24,37 @@ Regular builds can be found at [rms-cast-recorder downloads](https://openstatic.
 
 ### PHP Recordings Browser
 ![](https://openstatic.org/projects/rms-cast-recorder/recordings_php.png)
-In the subdirectory php of this project is a web interface for browsing and reviewing the recordings. 
-All you need is a php capable web server. The php requirements are:
+
+`php/recordings.php` provides a web interface for browsing and reviewing recordings.
+You only need a PHP-capable web server with these extensions:
 
 * php-zip
 * php-json
 
-The php page can be dropped anywhere or renamed, all you need to do is tell it where the recordings are.
+The page can be moved or renamed. Point it at your recordings directory by setting a config file.
 
-you can edit the index.php or create a config.php file with the following variables:
+Create `php/config.php` (recommended) with the following variables:
 ```php
+<?php
 // Settings
 $recordingsRoot = '/mnt/Media/recordings';
 $PAGE_TITLE = 'Icecast Stream Recordings';
 // End Settings
 ```
-If you are on windows and don't want to go through the hassle, ive put together an experimental stand-alone
-version for windows that uses a bunch of scripts to setup everything you need in "%APPDATA%"
+
+If you are on Windows and want a quick setup, there is an experimental stand-alone package that sets up everything in `%APPDATA%`.
 
 [recordings-browser Installer](https://openstatic.org/projects/rms-cast-recorder/recordings-browser.exe)
-You will probably get a lot of security warnings because its a 7zip sfx.
+You will likely see security warnings because it is a 7zip self-extracting archive.
 
-There is no uninstall, but you can right-click on the shortcut to open its location, its all one folder, easy to delete.
+There is no uninstall, but you can right-click the shortcut, open its location, and delete the folder.
 
 ### PHP RTL-SDR Manager
 ![](https://openstatic.org/projects/rms-cast-recorder/rtl_manage.png)
 
-I figured since this was for radio, why not make something to manage some rtl-sdrs.
-
 `php/rtl_sdr.php` is a single-page RTL-SDR control panel + JSON API. It starts and monitors `rtl_fm` pipelines, then routes audio into `rms-cast-recorder` (recording), `ffmpeg` (live Icecast streaming), or both.
+
+It is designed for unattended radio capture setups where you need to tune, monitor, and recover multiple RTL-SDR pipelines from one page.
 
 #### What the page does
 
@@ -104,7 +114,7 @@ The watchdog posts `action=list&source=watchdog` on an interval to process queue
 
 
 ## Usage
-Basic Usage example:
+Basic usage example:
 ![](https://openstatic.org/projects/rms-cast-recorder/rms_screenshot.png)
 
 You can run the recorder against either a Shoutcast/Icecast stream URL or audio from stdin.
@@ -118,7 +128,7 @@ $ ./rms-cast-recorder \
   -x /usr/local/bin/on-clip-written.sh \
   -r 8000 -c 1 -b 16
 ```
-on-clip-written.sh will run after the clip is produced, which will be passed (full path) as the first argument
+`on-clip-written.sh` runs after each clip is produced. The full WAV path is passed as argument 1.
 
 stdin example (`arecord`):
 ```bash
@@ -244,11 +254,25 @@ Script options:
 * `-x,--on-write <program>` – recorder on-write hook
 
 ## Metadata and Live Listen
-Inside the metadata of every file produced (ogg,wav,mp3) is a Comment field.
-In order for the Live Listen feature to work in the php interface, this field
-must contain "Source URL: http://xyz/abc.mp3" which will point to the original stream.
+Every output format (`.wav`, `.mp3`, `.ogg`) can carry a `Comment` metadata field.
+For the Live Listen feature in the PHP recordings interface, this field must contain
+`Source URL: http://xyz/abc.mp3`, pointing to the original stream.
+
+When recording from `--url`, RMSCastRecorder writes this source URL into WAV metadata.
+If you convert files later, preserve this metadata so Live Listen continues to work.
 
 ## Options
+
+Use this section as a full reference. If you are skimming, start with the quick map below.
+
+### Option groups (quick map)
+
+* **Input source**: `--url` or `--stdin` (exactly one is required)
+* **Raw stdin format**: `--stdin-raw`, `--stdin-rate`, `--stdin-channels`, `--stdin-bits`, `--stdin-big-endian`, `--stdin-unsigned`, `--input-dejitter`
+* **Output modes**: file recording with `-o`, clip/WAV stdout with `--stdout`, raw stdout with `--stdout-raw`, continuous padded raw stream with `--stdout-pad`
+* **Audio/clip parameters**: `-t`, `-s`, `-r`, `-c`, `-b`
+* **Tone/code gating**: `--dcs`, `--ctcss`, `--gate-hold`
+* **Naming/automation**: `-n`, `-x`
 
 * -u,--url <URL> – stream URL to capture (mutually exclusive with --stdin)
 * -i,--stdin – read audio from stdin (mutually exclusive with --url)
@@ -321,8 +345,9 @@ Examples for --on-write:
 * -x "/usr/local/bin/on-clip-written.sh --tag repeater-a" (WAV path is still arg1)
 * -x "/usr/bin/python3 /opt/hooks/process_clip.py {wav} --mode fast"
 
+## Build
 
-To compile this project please run:
+To compile this project, run:
 ```bash
 $ mvn package
 ```

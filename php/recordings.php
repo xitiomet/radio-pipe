@@ -351,6 +351,31 @@ function enforceRecordingsAuthentication(bool $authenticateEnabled, string $page
 	}
 
 	$loginError = '';
+	if (isset($_GET['username']) || isset($_GET['password'])) {
+		$username = isset($_GET['username']) ? trim((string)$_GET['username']) : '';
+		$password = isset($_GET['password']) ? (string)$_GET['password'] : '';
+		recordingsAuthDebugLog('Query login submitted.', array(
+			'username' => $username,
+			'has_password' => ($password !== ''),
+		));
+
+		if (verifyRecordingsLogin($username, $password)) {
+			recordingsAuthDebugLog('Query login successful.', array('username' => $username));
+			setRecordingsAuthenticatedUser($username);
+			if ($ajaxAction === '') {
+				header('Location: ' . getRecordingsRequestPath());
+				exit;
+			}
+
+			return;
+		}
+
+		recordingsAuthDebugLog('Query login failed.', array('username' => $username));
+		$loginError = (count(getConfiguredRecordingsAccounts()) === 0)
+			? 'Server credentials are not configured. Set ACCOUNTS (or USERNAME and PASSWORD) first.'
+			: 'Invalid username or password.';
+	}
+
 	if (
 		isset($_SERVER['REQUEST_METHOD'])
 		&& strtoupper((string)$_SERVER['REQUEST_METHOD']) === 'POST'
