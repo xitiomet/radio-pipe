@@ -4,6 +4,7 @@ import org.apache.commons.cli.*;
 import javax.sound.sampled.AudioFormat;
 
 import java.net.URL;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -139,8 +140,7 @@ public class RadioPipeMain
             ResolvedRecordingsDirectory resolvedRecordingsDirectory = null;
             if (!useStdout || hasOutDir) {
                 resolvedRecordingsDirectory = resolveRecordingsDirectory(cmd.getOptionValue("o"));
-                outDir = Paths.get(resolvedRecordingsDirectory.directory);
-                Files.createDirectories(outDir);
+                outDir = ensureRecordingsDirectory(resolvedRecordingsDirectory.directory);
             }
             logRecordingsDirectorySelection(outDir, resolvedRecordingsDirectory, useStdout, hasOutDir);
             double threshold = Double.parseDouble(cmd.getOptionValue("t", "-50"));
@@ -362,6 +362,28 @@ public class RadioPipeMain
             return new ResolvedRecordingsDirectory(envOutDir.trim(), "environment variable RADIOPIPE_RECORDINGS");
         }
         return new ResolvedRecordingsDirectory("./recordings", "built-in default");
+    }
+
+    private static Path ensureRecordingsDirectory(String configuredDirectory) throws ParseException, java.io.IOException
+    {
+        Path outDir = Paths.get(configuredDirectory).toAbsolutePath().normalize();
+
+        if (Files.exists(outDir)) {
+            if (!Files.isDirectory(outDir)) {
+                throw new ParseException("recordings path exists but is not a directory: " + outDir);
+            }
+            return outDir;
+        }
+
+        try {
+            Files.createDirectories(outDir);
+        } catch (FileAlreadyExistsException faee) {
+            if (!Files.isDirectory(outDir)) {
+                throw new ParseException("recordings path exists but is not a directory: " + outDir);
+            }
+        }
+
+        return outDir;
     }
 
     private static void logRecordingsDirectorySelection(Path outDir,

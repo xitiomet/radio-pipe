@@ -333,6 +333,8 @@ When using --stdout without -o, recordings are not written to disk (stdout-only 
 
 If `RADIOPIPE_RECORDINGS` is set (and non-empty), it is used as the default recordings directory whenever file recording is enabled and `-o` does not provide a path (including bare `-o`).
 
+On Linux/macOS shells, this value must be exported (for example, `export RADIOPIPE_RECORDINGS=/path`) so child processes like `radio-pipe` can read it.
+
 Examples for `RADIOPIPE_RECORDINGS`:
 
 Linux/macOS (bash):
