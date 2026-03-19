@@ -65,6 +65,9 @@ $STREAM_FFMPEG_TCP_NODELAY = isset($STREAM_FFMPEG_TCP_NODELAY)
 $RMS_STDOUT_PAD_DELAY_MS = isset($RMS_STDOUT_PAD_DELAY_MS)
 	? max(0, min(5000, (int)$RMS_STDOUT_PAD_DELAY_MS))
 	: 300;
+$RMS_INPUT_DEJITTER_MS = isset($RMS_INPUT_DEJITTER_MS)
+	? max(0, (int)$RMS_INPUT_DEJITTER_MS)
+	: 2000;
 
 function send_json(array $payload, int $statusCode = 200): void
 {
@@ -3043,10 +3046,38 @@ function rms_cast_recorder_supports_stdout_pad_delay(): bool
 	return $supports;
 }
 
+function rms_cast_recorder_supports_input_dejitter(): bool
+{
+	static $supports = null;
+	if ($supports !== null) {
+		return $supports;
+	}
+
+	if (!command_exists('rms-cast-recorder')) {
+		$supports = false;
+		return $supports;
+	}
+
+	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('rms-cast-recorder --help 2>&1'));
+	if (!is_string($helpOutput) || trim($helpOutput) === '') {
+		$supports = false;
+		return $supports;
+	}
+
+	$supports = stripos($helpOutput, '--input-dejitter') !== false;
+	return $supports;
+}
+
 function get_rms_stdout_pad_delay_ms(): int
 {
 	global $RMS_STDOUT_PAD_DELAY_MS;
 	return max(0, min(5000, (int)$RMS_STDOUT_PAD_DELAY_MS));
+}
+
+function get_rms_input_dejitter_ms(): int
+{
+	global $RMS_INPUT_DEJITTER_MS;
+	return max(0, (int)$RMS_INPUT_DEJITTER_MS);
 }
 
 function rms_cast_recorder_supports_ctcss(): bool
@@ -3071,11 +3102,20 @@ function rms_cast_recorder_supports_ctcss(): bool
 	return $supports;
 }
 
-function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCode = '', string $ctcssTone = '', int $stdoutPadDelayMs = 0): string
+function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCode = '', string $ctcssTone = '', int $stdoutPadDelayMs = 0, int $inputDejitterMs = 0): string
 {
 	$conditionerCommand = array(
 		'rms-cast-recorder',
 		'--stdin',
+	);
+
+	if ($inputDejitterMs > 0 && rms_cast_recorder_supports_input_dejitter()) {
+		$conditionerCommand[] = '--input-dejitter';
+		$conditionerCommand[] = (string)$inputDejitterMs;
+	}
+
+	array_push(
+		$conditionerCommand,
 		'--stdin-raw',
 		'--stdin-rate',
 		(string)$sampleRate,
@@ -3088,7 +3128,7 @@ function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCo
 		'-t',
 		'-120',
 		'-s',
-		'600',
+		'600'
 	);
 
 	if ($dcsCode !== '') {
@@ -3128,11 +3168,12 @@ function build_stream_input_conditioner_command(array $config): string
 	$dcsCode = trim((string)($config['dcs'] ?? ''));
 	$ctcssTone = trim((string)($config['ctcss'] ?? ''));
 	$stdoutPadDelayMs = get_rms_stdout_pad_delay_ms();
+	$inputDejitterMs = get_rms_input_dejitter_ms();
 
 	// Use recorder's raw stdout + pad mode as a lightweight conditioner for ffmpeg.
 	// Threshold/silence values keep the gate effectively open while stdout pad
 	// smooths upstream rtl_fm stalls.
-	return build_rms_stdout_pad_conditioner_command($sampleRate, $dcsCode, $ctcssTone, $stdoutPadDelayMs);
+	return build_rms_stdout_pad_conditioner_command($sampleRate, $dcsCode, $ctcssTone, $stdoutPadDelayMs, $inputDejitterMs);
 }
 
 function build_recording_recorder_command(array $config, bool $enableStdout = false): string
@@ -3140,6 +3181,18 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 	$recorderCommand = array(
 		'rms-cast-recorder',
 		'--stdin',
+	);
+
+	if ($enableStdout) {
+		$inputDejitterMs = get_rms_input_dejitter_ms();
+		if ($inputDejitterMs > 0 && rms_cast_recorder_supports_input_dejitter()) {
+			$recorderCommand[] = '--input-dejitter';
+			$recorderCommand[] = (string)$inputDejitterMs;
+		}
+	}
+
+	array_push(
+		$recorderCommand,
 		'--stdin-raw',
 		'--stdin-rate',
 		(string)$config['rtlBandwidth'],
@@ -3156,7 +3209,7 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 		'-o',
 		(string)$config['outputDir'],
 		'-n',
-		build_output_display_name($config),
+		build_output_display_name($config)
 	);
 
 	$dcsCode = trim((string)($config['dcs'] ?? ''));
@@ -3674,6 +3727,8 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 		$recordEnabled
 		&& in_array(strtolower((string)($config['afterRecordAction'] ?? 'none')), array('upload', 'upload_delete'), true);
 	$recorderSupportsStdoutPad = $recorderAvailable && rms_cast_recorder_supports_stdout_padding();
+	$rmsInputDejitterMs = $streamEnabled ? get_rms_input_dejitter_ms() : 0;
+	$recorderSupportsInputDejitter = $recorderAvailable && rms_cast_recorder_supports_input_dejitter();
 
 	if ($streamEnabled) {
 		if (!command_exists('ffmpeg')) {
@@ -3695,6 +3750,10 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 
 	if ($streamEnabled && !$recorderSupportsStdoutPad) {
 		return array('ok' => false, 'error' => 'Stream output requires rms-cast-recorder support for --stdout-raw and --stdout-pad. Upgrade rms-cast-recorder and retry.');
+	}
+
+	if ($streamEnabled && $rmsInputDejitterMs > 0 && !$recorderSupportsInputDejitter) {
+		return array('ok' => false, 'error' => 'Stream output is configured with RMS_INPUT_DEJITTER_MS, but this rms-cast-recorder build does not support --input-dejitter. Upgrade rms-cast-recorder or set RMS_INPUT_DEJITTER_MS to 0.');
 	}
 
 	if ($uploadModeEnabled && !command_exists('curl')) {
@@ -5329,6 +5388,7 @@ if ($action !== '') {
 
 <script type="text/javascript">
 var apiUrl = window.location.pathname;
+var rmsInputDejitterMs = <?php echo json_encode(get_rms_input_dejitter_ms()); ?>;
 var knownInstancesByDevice = {};
 var knownDetectedDevices = [];
 var deviceConfigsById = {};
@@ -6994,13 +7054,17 @@ function sanitizeTemplateConfig(config)
 	return clean;
 }
 
-function applyTemplateToDevice(deviceId, templateName)
+function applyTemplateToDevice(deviceId, templateName, currentConfigOverride)
 {
 	var name = String(templateName || '');
 	if (!name || !settingsTemplates[name]) {
 		throw new Error('Template not found.');
 	}
-	var current = getConfigForDevice(deviceId);
+	var current = (currentConfigOverride && typeof currentConfigOverride === 'object' && !Array.isArray(currentConfigOverride))
+		? applyClientOutputSelection(Object.assign({}, currentConfigOverride))
+		: getConfigForDevice(deviceId);
+	current.device = String(deviceId);
+	current.deviceIndex = normalizeClientDeviceIndex(String(current.deviceIndex || getDeviceIndexForId(deviceId) || ''));
 	var currentLinkMode = resolveMountLinkModeForConfig(current, current.deviceIndex || getDeviceIndexForId(deviceId));
 	var currentFollowDevice = currentLinkMode === 'device';
 	var merged = Object.assign({}, current, settingsTemplates[name]);
@@ -7107,6 +7171,41 @@ function getDefaultConfig(deviceId)
 		postCommandArg: '',
 		postCommand: '',
 		templateName: ''
+	};
+}
+
+function buildResetConfig(deviceId, currentConfig)
+{
+	var defaults = getDefaultConfig(deviceId);
+	var sourceConfig = (currentConfig && typeof currentConfig === 'object' && !Array.isArray(currentConfig))
+		? currentConfig
+		: {};
+	var deviceIndex = normalizeClientDeviceIndex(String(sourceConfig.deviceIndex || getDeviceIndexForId(deviceId) || defaults.deviceIndex || ''));
+	var preserveDeviceMountLink = resolveMountLinkModeForConfig(sourceConfig, deviceIndex) === 'device';
+
+	if (!preserveDeviceMountLink) {
+		return {
+			preserveDeviceMountLink: false,
+			config: defaults
+		};
+	}
+
+	defaults.deviceIndex = deviceIndex;
+	defaults.streamMountLinkMode = 'device';
+	defaults.streamMountFollowName = true;
+	defaults.streamMountFollowDevice = true;
+	defaults.streamMount = normalizeMountByFormat(
+		defaults.streamMount,
+		defaults.streamName,
+		defaults.streamFormat,
+		true,
+		true,
+		deviceIndex
+	);
+
+	return {
+		preserveDeviceMountLink: true,
+		config: defaults
 	};
 }
 
@@ -7350,7 +7449,11 @@ function buildPipelineStagePreviewLines(config)
 	var dcsCode = normalizeClientDcsCode(source.dcs);
 	var ctcssTone = normalizeClientCtcssTone(source.ctcss);
 	if (outputSelection.streamEnabled && outputSelection.recordEnabled) {
-		var recorderBothLine = 'rms-cast-recorder --stdin --stdout-pad';
+		var recorderBothLine = 'rms-cast-recorder --stdin';
+		if (rmsInputDejitterMs > 0) {
+			recorderBothLine += ' --input-dejitter ' + String(rmsInputDejitterMs);
+		}
+		recorderBothLine += ' --stdout-pad';
 		recorderBothLine += ' -t ' + String(source.threshold || '-40');
 		recorderBothLine += ' -s ' + String(source.silence || '2');
 		if (dcsCode !== '') {
@@ -7361,7 +7464,11 @@ function buildPipelineStagePreviewLines(config)
 		}
 		lines.push(recorderBothLine);
 	} else if (outputSelection.streamEnabled) {
-		var conditionerLine = 'rms-cast-recorder --stdin --stdout-pad';
+		var conditionerLine = 'rms-cast-recorder --stdin';
+		if (rmsInputDejitterMs > 0) {
+			conditionerLine += ' --input-dejitter ' + String(rmsInputDejitterMs);
+		}
+		conditionerLine += ' --stdout-pad';
 		if (dcsCode !== '') {
 			conditionerLine += ' --dcs ' + dcsCode;
 		}
@@ -9300,7 +9407,7 @@ function bindDeviceCard(card)
 				return;
 			}
 			try {
-				applyTemplateToDevice(deviceId, templateName);
+				applyTemplateToDevice(deviceId, templateName, readCardConfig(card));
 				saveDeviceConfigs(String(deviceId));
 				renderDeviceList();
 				setStatus('Loaded template "' + templateName + '" into device ' + deviceId + '.', false);
@@ -9560,9 +9667,17 @@ function clearConfigForCard(card)
 		return;
 	}
 
+	var currentConfig = readCardConfig(card);
+	var resetConfig = buildResetConfig(deviceId, currentConfig);
+
 	var resetToDefaults = function () {
-		delete deviceConfigsById[deviceId];
-		saveDeviceConfigs(deviceId, { remove: true });
+		if (resetConfig.preserveDeviceMountLink) {
+			deviceConfigsById[deviceId] = resetConfig.config;
+			saveDeviceConfigs(deviceId);
+		} else {
+			delete deviceConfigsById[deviceId];
+			saveDeviceConfigs(deviceId, { remove: true });
+		}
 		stopListeningForDevice(deviceId, true);
 		renderDeviceList();
 	};
