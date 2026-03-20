@@ -21,6 +21,21 @@ Common fields in every packet:
 - `apiPort`: websocket API port
 - `timestamp`: Unix epoch timestamp in milliseconds when the packet is emitted
 
+### Event Type Summary
+
+- `dcsDetected`: configured DCS gate opened
+- `dcsGone`: configured DCS gate closed
+- `ctcssDetected`: configured CTCSS gate opened
+- `ctcssGone`: configured CTCSS gate closed
+- `gateOpen`: overall audio gate opened
+- `gateClosed`: overall audio gate closed (or blocker changed)
+- `audioDetected`: gated audio clip started
+- `silenceDetected`: active clip ended due to silence
+- `savedRecording`: clip file written to disk (`filename` included)
+- `hookExecuted`: `--on-write` hook process started
+- `hookResult`: output line and/or completion from hook process
+- `status`: periodic snapshot event (every 250ms)
+
 ### DCS detected
 
 ```json
