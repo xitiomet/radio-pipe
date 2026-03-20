@@ -51,7 +51,7 @@ You will likely see security warnings because it is a 7zip self-extracting archi
 There is no uninstall, but you can right-click the shortcut, open its location, and delete the folder.
 
 ### PHP RTL-SDR Manager
-![](https://openstatic.org/projects/radio-pipe/rtl_manage.png)
+![](https://openstatic.org/projects/radio-pipe/rtlsdr_manager.png)
 
 `php/rtl_sdr.php` is a single-page RTL-SDR control panel + JSON API. It starts and monitors `rtl_fm` pipelines, then routes audio into `radio-pipe` (recording), `ffmpeg` (live Icecast streaming), or both.
 

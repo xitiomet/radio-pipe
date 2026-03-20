@@ -5,3 +5,4 @@ dependency-reduced-pom.xml
 .vscode/
 recordings/
 uploadReadme.sh
+*.wav
