@@ -78,7 +78,7 @@ public class RadioPipeMain
         options.addOption(Option.builder().longOpt("ctcss").hasArg().argName("HZ")
             .desc("Optional CTCSS tone gate in Hz (example: 100.0); clips only while matching tone is present").build());
         options.addOption(Option.builder().longOpt("gate-hold").hasArg().argName("SECONDS")
-            .desc("Hold DCS/CTCSS gates open for this many seconds after detection drops (default 1)").build());
+            .desc("Hold DCS/CTCSS gates open for this many seconds after detection drops (default 0)").build());
 
         try {
             cmd = parser.parse(options, args);

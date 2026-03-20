@@ -301,7 +301,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * -b,--bitrate <BITS> – output PCM bit depth in bits (default 16)
 * --dcs <CODE> – optional DCS gate code (octal, example `023`); clip audio only while matching DCS is detected
 * --ctcss <HZ> – optional CTCSS gate tone in Hz (example `100.0`); clip audio only while matching tone is detected
-* --gate-hold <SECONDS> – additional grace time to keep DCS/CTCSS gates open after decode drops (default `1`)
+* --gate-hold <SECONDS> – additional grace time to keep DCS/CTCSS gates open after decode drops (default `0`)
 * -n,--name <STREAM> – override stream name used in output filenames
 * -x,--on-write <PROGRAM> – optional script/program to run each time a WAV is
   written; if {wav} is omitted, the full WAV path is passed as argument 1
@@ -327,7 +327,7 @@ When using --ctcss, output PCM bit depth must be 16 (`--bitrate 16`).
 
 When using both --dcs and --ctcss, both gates must match for clips to open.
 
-`--gate-hold` adds extra hold time after DCS/CTCSS detection loss to prevent brief weak/noisy decode dropouts from closing the gate immediately (default `1` second).
+`--gate-hold` adds extra hold time after DCS/CTCSS detection loss to prevent brief weak/noisy decode dropouts from closing the gate immediately (default `0` second).
 
 When using --stdout without -o, recordings are not written to disk (stdout-only mode).
 
