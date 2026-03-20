@@ -68,6 +68,12 @@ $RMS_STDOUT_PAD_DELAY_MS = isset($RMS_STDOUT_PAD_DELAY_MS)
 $RMS_INPUT_DEJITTER_MS = isset($RMS_INPUT_DEJITTER_MS)
 	? max(0, (int)$RMS_INPUT_DEJITTER_MS)
 	: 150;
+$RADIO_PIPE_API_WEBSOCKET_HOST = isset($RADIO_PIPE_API_WEBSOCKET_HOST) && trim((string)$RADIO_PIPE_API_WEBSOCKET_HOST) !== ''
+	? trim((string)$RADIO_PIPE_API_WEBSOCKET_HOST)
+	: '0.0.0.0';
+$RADIO_PIPE_API_WEBSOCKET_BASE_PORT = isset($RADIO_PIPE_API_WEBSOCKET_BASE_PORT)
+	? max(1024, min(65000, (int)$RADIO_PIPE_API_WEBSOCKET_BASE_PORT))
+	: 9400;
 
 function send_json(array $payload, int $statusCode = 200): void
 {
@@ -2485,6 +2491,425 @@ function build_log_payload_for_device(string $logDir, string $deviceId, array $s
 	);
 }
 
+function parse_radio_pipe_api_websocket_address(string $rawAddress): array
+{
+	$address = trim($rawAddress);
+	if ($address === '') {
+		return array('ok' => false, 'host' => '', 'port' => 0, 'error' => 'WebSocket address is empty.');
+	}
+
+	$host = '';
+	$portText = '';
+	$bracketMatches = array();
+	if (preg_match('/^\[([^\]]+)\]:(\d{1,5})$/', $address, $bracketMatches) === 1) {
+		$host = trim((string)$bracketMatches[1]);
+		$portText = trim((string)$bracketMatches[2]);
+	} else {
+		$separatorIndex = strrpos($address, ':');
+		if ($separatorIndex === false || $separatorIndex <= 0) {
+			return array('ok' => false, 'host' => '', 'port' => 0, 'error' => 'WebSocket address must be host:port.');
+		}
+
+		$host = trim(substr($address, 0, $separatorIndex));
+		$portText = trim(substr($address, $separatorIndex + 1));
+	}
+
+	$port = (int)$portText;
+	if ($host === '' || $port < 1 || $port > 65535) {
+		return array('ok' => false, 'host' => '', 'port' => 0, 'error' => 'WebSocket host or port is invalid.');
+	}
+
+	return array('ok' => true, 'host' => $host, 'port' => $port, 'error' => '');
+}
+
+function normalize_radio_pipe_api_connect_host(string $host): string
+{
+	$normalized = trim($host);
+	$lower = strtolower($normalized);
+	if ($lower === '' || $lower === '0.0.0.0' || $lower === '::' || $lower === '[::]' || $lower === 'localhost') {
+		return '127.0.0.1';
+	}
+
+	if (strpos($normalized, ':') !== false && strpos($normalized, '[') !== 0) {
+		return '[' . $normalized . ']';
+	}
+
+	return $normalized;
+}
+
+function extract_radio_pipe_api_websocket_address_from_command(string $command): string
+{
+	$trimmedCommand = trim($command);
+	if ($trimmedCommand === '') {
+		return '';
+	}
+
+	$matches = array();
+	if (preg_match("~--api-websocket\\s+(?:\"([^\"]+)\"|'([^']+)'|([^\\s|]+))~i", $trimmedCommand, $matches) !== 1) {
+		return '';
+	}
+
+	for ($i = 1; $i <= 3; $i++) {
+		if (isset($matches[$i]) && trim((string)$matches[$i]) !== '') {
+			return trim((string)$matches[$i]);
+		}
+	}
+
+	return '';
+}
+
+function resolve_radio_pipe_api_websocket_address_for_instance(array $instance): string
+{
+	$config = isset($instance['config']) && is_array($instance['config'])
+		? $instance['config']
+		: array();
+
+	$directAddress = trim((string)($config['apiWebsocketAddress'] ?? ''));
+	if ($directAddress !== '') {
+		return $directAddress;
+	}
+
+	$host = trim((string)($config['apiWebsocketHost'] ?? ''));
+	$port = (int)($config['apiWebsocketPort'] ?? 0);
+	if ($host !== '' && $port >= 1 && $port <= 65535) {
+		return $host . ':' . (string)$port;
+	}
+
+	$commandAddress = extract_radio_pipe_api_websocket_address_from_command((string)($instance['command'] ?? ''));
+	if ($commandAddress !== '') {
+		return $commandAddress;
+	}
+
+	return '';
+}
+
+function radio_pipe_ws_read_exact($socket, int $length, int $deadlineUs): ?string
+{
+	if (!is_resource($socket) || $length < 0) {
+		return null;
+	}
+
+	if ($length === 0) {
+		return '';
+	}
+
+	$buffer = '';
+	while (strlen($buffer) < $length) {
+		$remainingUs = $deadlineUs - (int)floor(microtime(true) * 1000000);
+		if ($remainingUs <= 0) {
+			return null;
+		}
+
+		$read = array($socket);
+		$write = null;
+		$except = null;
+		$seconds = (int)floor($remainingUs / 1000000);
+		$microseconds = (int)($remainingUs % 1000000);
+		$ready = @stream_select($read, $write, $except, $seconds, $microseconds);
+		if ($ready === false || $ready === 0) {
+			return null;
+		}
+
+		$chunk = fread($socket, $length - strlen($buffer));
+		if (!is_string($chunk) || $chunk === '') {
+			return null;
+		}
+
+		$buffer .= $chunk;
+	}
+
+	return $buffer;
+}
+
+function radio_pipe_ws_read_frame($socket, int $deadlineUs): ?array
+{
+	$header = radio_pipe_ws_read_exact($socket, 2, $deadlineUs);
+	if (!is_string($header) || strlen($header) !== 2) {
+		return null;
+	}
+
+	$byte1 = ord($header[0]);
+	$byte2 = ord($header[1]);
+	$opcode = $byte1 & 0x0F;
+	$masked = ($byte2 & 0x80) === 0x80;
+	$payloadLength = $byte2 & 0x7F;
+
+	if ($payloadLength === 126) {
+		$extended = radio_pipe_ws_read_exact($socket, 2, $deadlineUs);
+		if (!is_string($extended) || strlen($extended) !== 2) {
+			return null;
+		}
+		$decoded = unpack('nlength', $extended);
+		$payloadLength = (int)($decoded['length'] ?? 0);
+	} elseif ($payloadLength === 127) {
+		$extended = radio_pipe_ws_read_exact($socket, 8, $deadlineUs);
+		if (!is_string($extended) || strlen($extended) !== 8) {
+			return null;
+		}
+		$decoded = unpack('Nhigh/Nlow', $extended);
+		$high = (int)($decoded['high'] ?? 0);
+		$low = (int)($decoded['low'] ?? 0);
+		if ($high !== 0) {
+			return null;
+		}
+		$payloadLength = $low;
+	}
+
+	$maskingKey = '';
+	if ($masked) {
+		$maskingKey = radio_pipe_ws_read_exact($socket, 4, $deadlineUs);
+		if (!is_string($maskingKey) || strlen($maskingKey) !== 4) {
+			return null;
+		}
+	}
+
+	$payload = radio_pipe_ws_read_exact($socket, $payloadLength, $deadlineUs);
+	if (!is_string($payload) || strlen($payload) !== $payloadLength) {
+		return null;
+	}
+
+	if ($masked) {
+		$unmasked = '';
+		for ($i = 0; $i < $payloadLength; $i++) {
+			$unmasked .= $payload[$i] ^ $maskingKey[$i % 4];
+		}
+		$payload = $unmasked;
+	}
+
+	return array(
+		'opcode' => $opcode,
+		'payload' => $payload,
+	);
+}
+
+function radio_pipe_ws_write_frame($socket, int $opcode, string $payload = ''): bool
+{
+	if (!is_resource($socket)) {
+		return false;
+	}
+
+	$payloadLength = strlen($payload);
+	$firstByte = chr(0x80 | ($opcode & 0x0F));
+
+	$maskingKey = '';
+	if (function_exists('random_bytes')) {
+		try {
+			$maskingKey = random_bytes(4);
+		} catch (Throwable $exception) {
+			$maskingKey = '';
+		}
+	}
+	if (!is_string($maskingKey) || strlen($maskingKey) !== 4) {
+		$fallback = hash('sha256', uniqid('ws-mask-', true), true);
+		$maskingKey = is_string($fallback) ? substr($fallback, 0, 4) : "\x00\x00\x00\x00";
+	}
+
+	$maskedPayload = '';
+	for ($i = 0; $i < $payloadLength; $i++) {
+		$maskedPayload .= $payload[$i] ^ $maskingKey[$i % 4];
+	}
+
+	if ($payloadLength < 126) {
+		$header = $firstByte . chr(0x80 | $payloadLength);
+	} elseif ($payloadLength <= 65535) {
+		$header = $firstByte . chr(0x80 | 126) . pack('n', $payloadLength);
+	} else {
+		$header = $firstByte . chr(0x80 | 127) . pack('NN', 0, $payloadLength);
+	}
+
+	$frame = $header . $maskingKey . $maskedPayload;
+	$written = @fwrite($socket, $frame);
+	return is_int($written) && $written === strlen($frame);
+}
+
+function radio_pipe_status_from_api_websocket(string $apiAddress, int $timeoutMs = 1200): array
+{
+	$parsedAddress = parse_radio_pipe_api_websocket_address($apiAddress);
+	if (($parsedAddress['ok'] ?? false) !== true) {
+		return array('ok' => false, 'status' => null, 'error' => (string)($parsedAddress['error'] ?? 'Invalid websocket address.'));
+	}
+
+	$host = (string)($parsedAddress['host'] ?? '');
+	$port = (int)($parsedAddress['port'] ?? 0);
+	$connectHost = normalize_radio_pipe_api_connect_host($host);
+	$connectTarget = 'tcp://' . $connectHost . ':' . (string)$port;
+	$timeoutMs = max(200, $timeoutMs);
+	$connectTimeoutSeconds = max(1, min(5, (int)ceil($timeoutMs / 1000)));
+
+	$errno = 0;
+	$errstr = '';
+	$socket = @stream_socket_client($connectTarget, $errno, $errstr, $connectTimeoutSeconds, STREAM_CLIENT_CONNECT);
+	if ($socket === false) {
+		return array('ok' => false, 'status' => null, 'error' => 'Failed to connect to websocket endpoint (' . $connectTarget . ').');
+	}
+
+	$deadlineUs = (int)floor(microtime(true) * 1000000) + ($timeoutMs * 1000);
+	$wsKey = '';
+	if (function_exists('random_bytes')) {
+		try {
+			$wsKey = base64_encode(random_bytes(16));
+		} catch (Throwable $exception) {
+			$wsKey = '';
+		}
+	}
+	if ($wsKey === '') {
+		$wsKey = base64_encode(hash('sha256', uniqid('ws-key-', true), true));
+	}
+
+	$requestLines = array(
+		'GET / HTTP/1.1',
+		'Host: ' . $host . ':' . (string)$port,
+		'Upgrade: websocket',
+		'Connection: Upgrade',
+		'Sec-WebSocket-Key: ' . $wsKey,
+		'Sec-WebSocket-Version: 13',
+		'',
+		'',
+	);
+	$request = implode("\r\n", $requestLines);
+	$writeResult = @fwrite($socket, $request);
+	if (!is_int($writeResult) || $writeResult <= 0) {
+		fclose($socket);
+		return array('ok' => false, 'status' => null, 'error' => 'Failed websocket handshake write.');
+	}
+
+	$responseHeaders = '';
+	while (strpos($responseHeaders, "\r\n\r\n") === false) {
+		$byte = radio_pipe_ws_read_exact($socket, 1, $deadlineUs);
+		if (!is_string($byte) || $byte === '') {
+			fclose($socket);
+			return array('ok' => false, 'status' => null, 'error' => 'Timed out waiting for websocket handshake response.');
+		}
+		$responseHeaders .= $byte;
+		if (strlen($responseHeaders) > 8192) {
+			fclose($socket);
+			return array('ok' => false, 'status' => null, 'error' => 'Websocket handshake response too large.');
+		}
+	}
+
+	if (preg_match('/^HTTP\/\S+\s+101\b/i', $responseHeaders) !== 1) {
+		fclose($socket);
+		return array('ok' => false, 'status' => null, 'error' => 'Websocket handshake failed.');
+	}
+
+	$statusPayload = null;
+	while ((int)floor(microtime(true) * 1000000) < $deadlineUs) {
+		$frame = radio_pipe_ws_read_frame($socket, $deadlineUs);
+		if (!is_array($frame)) {
+			break;
+		}
+
+		$opcode = (int)($frame['opcode'] ?? -1);
+		$payload = (string)($frame['payload'] ?? '');
+		if ($opcode === 0x9) {
+			radio_pipe_ws_write_frame($socket, 0xA, $payload);
+			continue;
+		}
+		if ($opcode === 0x8) {
+			break;
+		}
+		if ($opcode !== 0x1) {
+			continue;
+		}
+
+		$decoded = json_decode($payload, true);
+		if (!is_array($decoded)) {
+			continue;
+		}
+
+		$eventName = strtolower(trim((string)($decoded['event'] ?? '')));
+		if ($eventName === 'status') {
+			$statusPayload = $decoded;
+			break;
+		}
+	}
+
+	fclose($socket);
+
+	if (!is_array($statusPayload)) {
+		return array('ok' => false, 'status' => null, 'error' => 'No status packet received from websocket endpoint.');
+	}
+
+	return array('ok' => true, 'status' => $statusPayload, 'error' => '');
+}
+
+function build_radio_pipe_status_payload_for_device(string $deviceId, array $state): array
+{
+	$requestedDeviceId = normalize_device_id($deviceId);
+	if ($requestedDeviceId === '') {
+		$requestedDeviceId = trim($deviceId);
+	}
+
+	$stateDeviceKey = find_state_device_key($state, $requestedDeviceId);
+	$resolvedDeviceId = $requestedDeviceId;
+	if ($stateDeviceKey !== '' && isset($state[$stateDeviceKey]) && is_array($state[$stateDeviceKey])) {
+		$instance = $state[$stateDeviceKey];
+		$config = isset($instance['config']) && is_array($instance['config']) ? $instance['config'] : array();
+		$configDeviceId = normalize_device_id((string)($config['device'] ?? $stateDeviceKey));
+		$configSerial = normalize_device_serial((string)($config['deviceSerial'] ?? ''));
+		if ($configSerial !== '') {
+			$configDeviceId = 'sn:' . $configSerial;
+		}
+		if ($configDeviceId !== '') {
+			$resolvedDeviceId = $configDeviceId;
+		}
+	}
+
+	if ($stateDeviceKey === '' || !isset($state[$stateDeviceKey]) || !is_array($state[$stateDeviceKey])) {
+		return array(
+			'device' => $resolvedDeviceId,
+			'running' => false,
+			'apiWebsocketAddress' => '',
+			'status' => null,
+			'error' => 'Device is not running.',
+		);
+	}
+
+	$instance = (array)$state[$stateDeviceKey];
+	$running = is_instance_running($instance);
+	$apiAddress = resolve_radio_pipe_api_websocket_address_for_instance($instance);
+	if (!$running) {
+		return array(
+			'device' => $resolvedDeviceId,
+			'running' => false,
+			'apiWebsocketAddress' => $apiAddress,
+			'status' => null,
+			'error' => 'Device is not running.',
+		);
+	}
+
+	if ($apiAddress === '') {
+		return array(
+			'device' => $resolvedDeviceId,
+			'running' => true,
+			'apiWebsocketAddress' => '',
+			'status' => null,
+			'error' => 'Missing websocket endpoint for device.',
+		);
+	}
+
+	$statusResult = radio_pipe_status_from_api_websocket($apiAddress, 1200);
+	if (($statusResult['ok'] ?? false) !== true) {
+		return array(
+			'device' => $resolvedDeviceId,
+			'running' => true,
+			'apiWebsocketAddress' => $apiAddress,
+			'status' => null,
+			'error' => (string)($statusResult['error'] ?? 'Failed to read websocket status.'),
+		);
+	}
+
+	return array(
+		'device' => $resolvedDeviceId,
+		'running' => true,
+		'apiWebsocketAddress' => $apiAddress,
+		'status' => isset($statusResult['status']) && is_array($statusResult['status'])
+			? $statusResult['status']
+			: null,
+		'error' => '',
+	);
+}
+
 function force_release_device(string $deviceId): void
 {
 	$runtimeDeviceIndex = normalize_device_index($deviceId);
@@ -2965,6 +3390,11 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		}
 	}
 
+	$apiWebsocketOptions = get_radio_pipe_api_websocket_options(array(
+		'device' => $deviceId,
+		'deviceIndex' => $deviceIndex,
+	));
+
 	return array(
 		'device' => $deviceId,
 		'deviceIndex' => $deviceIndex,
@@ -2995,6 +3425,9 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'outputDir' => $outputDir,
 		'streamName' => $streamName,
 		'deviceSerial' => $deviceSerial,
+		'apiWebsocketHost' => (string)($apiWebsocketOptions['host'] ?? ''),
+		'apiWebsocketPort' => (int)($apiWebsocketOptions['port'] ?? 0),
+		'apiWebsocketAddress' => (string)($apiWebsocketOptions['bindAddress'] ?? ''),
 		'afterRecordAction' => $afterRecordAction,
 		'postCommandArg' => $postCommandArg,
 		'postCommand' => $postCommandArg,
@@ -3109,12 +3542,116 @@ function radio_pipe_supports_ctcss(): bool
 	return $supports;
 }
 
-function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCode = '', string $ctcssTone = '', int $stdoutPadDelayMs = 0, int $inputDejitterMs = 0, int $streamSampleRate = 0): string
+function radio_pipe_supports_api_websocket(): bool
+{
+	static $supports = null;
+	if ($supports !== null) {
+		return $supports;
+	}
+
+	if (!command_exists('radio-pipe')) {
+		$supports = false;
+		return $supports;
+	}
+
+	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('radio-pipe --help 2>&1'));
+	if (!is_string($helpOutput) || trim($helpOutput) === '') {
+		$supports = false;
+		return $supports;
+	}
+
+	$supports = stripos($helpOutput, '--api-websocket') !== false;
+	return $supports;
+}
+
+function normalize_radio_pipe_api_websocket_host(string $host): string
+{
+	$trimmedHost = trim($host);
+	if ($trimmedHost === '') {
+		return '0.0.0.0';
+	}
+
+	if (preg_match('/^[A-Za-z0-9.:-]+$/', $trimmedHost) !== 1) {
+		return '0.0.0.0';
+	}
+
+	if (strcasecmp($trimmedHost, 'localhost') === 0) {
+		return '127.0.0.1';
+	}
+
+	return $trimmedHost;
+}
+
+function get_radio_pipe_api_websocket_base_port(): int
+{
+	global $RADIO_PIPE_API_WEBSOCKET_BASE_PORT;
+	return max(1024, min(65000, (int)$RADIO_PIPE_API_WEBSOCKET_BASE_PORT));
+}
+
+function derive_radio_pipe_api_websocket_port(array $config): int
+{
+	$basePort = get_radio_pipe_api_websocket_base_port();
+	$deviceIndex = normalize_device_index((string)($config['deviceIndex'] ?? ''));
+	if ($deviceIndex !== '') {
+		$offset = max(0, (int)$deviceIndex);
+		$offset = min($offset, 65535 - $basePort);
+		return $basePort + $offset;
+	}
+
+	$deviceId = normalize_device_id((string)($config['device'] ?? ''));
+	if ($deviceId === '') {
+		return $basePort;
+	}
+
+	$span = max(1, 65535 - $basePort);
+	$hashValue = (int)sprintf('%u', crc32($deviceId));
+	return $basePort + ($hashValue % $span);
+}
+
+function get_radio_pipe_api_websocket_options(array $config): array
+{
+	global $RADIO_PIPE_API_WEBSOCKET_HOST;
+
+	if (!radio_pipe_supports_api_websocket()) {
+		return array(
+			'enabled' => false,
+			'host' => '',
+			'port' => 0,
+			'bindAddress' => '',
+		);
+	}
+
+	$host = normalize_radio_pipe_api_websocket_host((string)$RADIO_PIPE_API_WEBSOCKET_HOST);
+	$port = derive_radio_pipe_api_websocket_port($config);
+	if ($port < 1 || $port > 65535) {
+		return array(
+			'enabled' => false,
+			'host' => '',
+			'port' => 0,
+			'bindAddress' => '',
+		);
+	}
+
+	return array(
+		'enabled' => true,
+		'host' => $host,
+		'port' => $port,
+		'bindAddress' => $host . ':' . (string)$port,
+	);
+}
+
+function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCode = '', string $ctcssTone = '', int $stdoutPadDelayMs = 0, int $inputDejitterMs = 0, int $streamSampleRate = 0, string $apiWebsocketAddress = ''): string
 {
 	$conditionerCommand = array(
 		'radio-pipe',
 		'--stdin',
 	);
+
+	$trimmedApiWebsocketAddress = trim($apiWebsocketAddress);
+	if ($trimmedApiWebsocketAddress !== '') {
+		$conditionerCommand[] = '--api-websocket';
+		$conditionerCommand[] = $trimmedApiWebsocketAddress;
+	}
 
 	if ($inputDejitterMs > 0 && radio_pipe_supports_input_dejitter()) {
 		$conditionerCommand[] = '--input-dejitter';
@@ -3177,11 +3714,13 @@ function build_stream_input_conditioner_command(array $config): string
 	$stdoutPadDelayMs = get_rms_stdout_pad_delay_ms();
 	$inputDejitterMs = get_rms_input_dejitter_ms();
 	$streamSampleRate = max(0, (int)($config['streamSampleRate'] ?? 0));
+	$apiWebsocketOptions = get_radio_pipe_api_websocket_options($config);
+	$apiWebsocketAddress = (string)($apiWebsocketOptions['bindAddress'] ?? '');
 
 	// Use recorder's raw stdout + pad mode as a lightweight conditioner for ffmpeg.
 	// Threshold/silence values keep the gate effectively open while stdout pad
 	// smooths upstream rtl_fm stalls.
-	return build_rms_stdout_pad_conditioner_command($sampleRate, $dcsCode, $ctcssTone, $stdoutPadDelayMs, $inputDejitterMs, $streamSampleRate);
+	return build_rms_stdout_pad_conditioner_command($sampleRate, $dcsCode, $ctcssTone, $stdoutPadDelayMs, $inputDejitterMs, $streamSampleRate, $apiWebsocketAddress);
 }
 
 function build_recording_recorder_command(array $config, bool $enableStdout = false): string
@@ -3190,6 +3729,13 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 		'radio-pipe',
 		'--stdin',
 	);
+
+	$apiWebsocketOptions = get_radio_pipe_api_websocket_options($config);
+	$apiWebsocketAddress = trim((string)($apiWebsocketOptions['bindAddress'] ?? ''));
+	if ($apiWebsocketAddress !== '') {
+		$recorderCommand[] = '--api-websocket';
+		$recorderCommand[] = $apiWebsocketAddress;
+	}
 
 	if ($enableStdout) {
 		$inputDejitterMs = get_rms_input_dejitter_ms();
@@ -3745,6 +4291,7 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 	$recorderSupportsStdoutPad = $recorderAvailable && radio_pipe_supports_stdout_padding();
 	$rmsInputDejitterMs = $streamEnabled ? get_rms_input_dejitter_ms() : 0;
 	$recorderSupportsInputDejitter = $recorderAvailable && radio_pipe_supports_input_dejitter();
+	$recorderSupportsApiWebsocket = $recorderAvailable && radio_pipe_supports_api_websocket();
 
 	if ($streamEnabled) {
 		if (!command_exists('ffmpeg')) {
@@ -3758,6 +4305,10 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 
 	if ($recordEnabled && !$recorderAvailable) {
 		return array('ok' => false, 'error' => 'radio-pipe is required when Record output is enabled but was not found in PATH.');
+	}
+
+	if (!$recorderSupportsApiWebsocket) {
+		return array('ok' => false, 'error' => 'radio-pipe must support --api-websocket. Upgrade radio-pipe and retry.');
 	}
 
 	if ($ctcssTone !== '' && !radio_pipe_supports_ctcss()) {
@@ -3782,6 +4333,15 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 			return array('ok' => false, 'error' => 'Failed to create upload hook script: ' . $hookScriptPath);
 		}
 	}
+
+	$apiWebsocketOptions = get_radio_pipe_api_websocket_options($config);
+	$apiWebsocketAddress = trim((string)($apiWebsocketOptions['bindAddress'] ?? ''));
+	if (!(bool)($apiWebsocketOptions['enabled'] ?? false) || $apiWebsocketAddress === '') {
+		return array('ok' => false, 'error' => 'Failed to resolve radio-pipe websocket endpoint for this device.');
+	}
+	$config['apiWebsocketHost'] = (string)($apiWebsocketOptions['host'] ?? '');
+	$config['apiWebsocketPort'] = (int)($apiWebsocketOptions['port'] ?? 0);
+	$config['apiWebsocketAddress'] = $apiWebsocketAddress;
 
 	if (!is_dir($logDir) && !mkdir($logDir, 0775, true) && !is_dir($logDir)) {
 		return array('ok' => false, 'error' => 'Failed to create log directory: ' . $logDir);
@@ -4779,6 +5339,35 @@ if ($action !== '') {
 		send_json($response);
 	}
 
+	if ($action === 'radio_pipe_status_batch') {
+		$payload = $_POST;
+		if (is_array($jsonPayload) && count($jsonPayload) > 0) {
+			$payload = array_merge($payload, $jsonPayload);
+		}
+
+		$rawDevices = isset($payload['devices']) ? $payload['devices'] : array();
+		$deviceIds = normalize_device_id_list($rawDevices);
+		if (count($deviceIds) === 0) {
+			$runningInstances = list_instances($state);
+			$detectedDeviceIds = array();
+			foreach ($runningInstances as $runningInstance) {
+				$instanceDeviceId = normalize_device_id((string)($runningInstance['device'] ?? ''));
+				if ($instanceDeviceId === '') {
+					continue;
+				}
+				$detectedDeviceIds[$instanceDeviceId] = true;
+			}
+			$deviceIds = array_keys($detectedDeviceIds);
+		}
+
+		$statusesByDevice = array();
+		foreach ($deviceIds as $batchDeviceId) {
+			$statusesByDevice[$batchDeviceId] = build_radio_pipe_status_payload_for_device((string)$batchDeviceId, $state);
+		}
+
+		send_json(array('ok' => true, 'statuses' => $statusesByDevice));
+	}
+
 	if ($action === 'stop') {
 		$requestedDeviceId = normalize_device_id($_POST['device'] ?? $_GET['device'] ?? ($jsonPayload['device'] ?? ''));
 		if ($requestedDeviceId === '') {
@@ -5129,7 +5718,7 @@ if ($action !== '') {
 		.template-modal-actions .refresh-button { flex: 1 1 220px; }
 		#templateDeviceSelect { min-width: 210px; }
 		.device-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
-		.device-card { padding: 16px; position: relative; overflow: hidden; }
+		.device-card { padding: 14px; position: relative; overflow: hidden; }
 		.device-card::after {
 			content: "";
 			position: absolute;
@@ -5139,8 +5728,19 @@ if ($action !== '') {
 			background: radial-gradient(circle, rgba(217, 164, 65, 0.16), transparent 70%);
 			pointer-events: none;
 		}
-		.device-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: start; position: relative; z-index: 1; }
+		.device-header { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; align-items: start; position: relative; z-index: 1; }
 		.device-title-row { min-width: 0; }
+		.device-title-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; min-width: 0; }
+		.device-rms-stack { margin-top: 6px; display: flex; flex-direction: column; gap: 5px; min-width: 0; width: 100%; }
+		.device-rms-meter { display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-width: 0; width: 100%; }
+		.device-rms-track { flex: 1 1 auto; width: 100%; min-width: 0; height: 8px; border-radius: 999px; overflow: hidden; border: 1px solid var(--border); background: var(--input); }
+		.device-rms-fill { width: 0%; height: 100%; transition: width 0.18s ease, background-color 0.18s ease, opacity 0.18s ease; background: var(--muted); }
+		.device-rms-meter.rms-off .device-rms-fill { background: var(--muted); opacity: 0.45; }
+		.device-rms-meter.rms-idle .device-rms-fill { background: var(--muted); opacity: 0.7; }
+		.device-rms-meter.rms-low .device-rms-fill { background: var(--danger); opacity: 0.95; }
+		.device-rms-meter.rms-mid .device-rms-fill { background: var(--accent); opacity: 0.95; }
+		.device-rms-meter.rms-high .device-rms-fill { background: var(--success); opacity: 0.95; }
+		.device-rms-label { flex: 0 0 auto; min-width: 0; text-align: left; font-size: 10px; line-height: 1.1; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 		.state-pills {
 			display: inline-flex;
 			align-items: center;
@@ -5150,16 +5750,16 @@ if ($action !== '') {
 			flex: 0 0 auto;
 			white-space: nowrap;
 		}
-		.device-title { margin: 0; font-size: 20px; }
+		.device-title { margin: 0; font-size: 20px; line-height: 1.2; min-width: 0; }
 		.device-stream-name { grid-column: 1 / -1; margin: 0; color: var(--accent); font-size: 16px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-		.device-subtitle { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-		.device-antenna-row { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+		.device-subtitle { grid-column: 1 / -1; margin: 2px 0 0; color: var(--muted); font-size: 12px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+		.device-antenna-row { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 1px; }
 		.device-antenna-label { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 		.state-pill {
 			display: inline-flex;
 			align-items: center;
 			gap: 6px;
-			padding: 6px 10px;
+			padding: 5px 10px;
 			border-radius: 999px;
 			font-size: 11px;
 			text-transform: uppercase;
@@ -5173,33 +5773,33 @@ if ($action !== '') {
 		.state-pill.rx-idle { color: #ffd783; border-color: rgba(217, 164, 65, 0.5); background: rgba(217, 164, 65, 0.16); }
 		.state-pill.rx-off { color: #98a7bb; border-color: rgba(127, 145, 168, 0.42); background: rgba(127, 145, 168, 0.14); }
 		.state-pills .action-copy-stream,
-		.state-pills .action-listen-stream { display: inline-flex; align-items: center; padding: 6px 10px; font-size: 11px; border-radius: 999px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text); cursor: pointer; text-transform: uppercase; letter-spacing: 0.08em; transition: all 0.2s; font-family: inherit; font-weight: 500; white-space: nowrap; }
+		.state-pills .action-listen-stream { display: inline-flex; align-items: center; padding: 5px 10px; font-size: 11px; border-radius: 999px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text); cursor: pointer; text-transform: uppercase; letter-spacing: 0.08em; transition: all 0.2s; font-family: inherit; font-weight: 500; white-space: nowrap; }
 		.state-pills .action-copy-stream:hover { background: rgba(255,255,255,0.08); }
 		.state-pills .action-listen-stream:hover { background: rgba(255,255,255,0.08); }
 		.state-pills .action-listen-stream.danger { color: #ffb3b3; border-color: rgba(241, 143, 143, 0.45); background: rgba(241, 143, 143, 0.14); }
-		.device-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; position: relative; z-index: 1; }
-		.device-log-toggle { margin-top: 12px; position: relative; z-index: 1; display: flex; gap: 8px; flex-wrap: wrap; }
-		.device-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 14px; position: relative; z-index: 1; align-items: start; }
-		.meta-box { display: flex; flex-direction: column; justify-content: flex-start; min-height: 50px; padding: 10px; border-radius: 12px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); }
+		.device-actions { display: flex; gap: 8px; row-gap: 8px; flex-wrap: wrap; margin-top: 12px; position: relative; z-index: 1; }
+		.device-log-toggle { margin-top: 10px; position: relative; z-index: 1; display: flex; gap: 8px; flex-wrap: wrap; }
+		.device-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 8px; margin-top: 10px; position: relative; z-index: 1; align-items: start; }
+		.meta-box { display: flex; flex-direction: column; justify-content: flex-start; gap: 1px; min-height: 0; padding: 6px 9px 7px; border-radius: 12px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); }
 		.meta-box.full { grid-column: span 3; min-height: auto; }
-		.meta-label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 4px; }
-		.meta-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+		.meta-label { display: block; font-size: 10px; line-height: 1.05; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 1px; }
+		.meta-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 1px; }
 		.meta-label-row .meta-label { margin-bottom: 0; }
 		.meta-label-row .refresh-button.compact { padding: 4px 8px; font-size: 10px; letter-spacing: 0.06em; }
-		.meta-value { font-size: 12px; word-break: break-word; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.meta-value { font-size: 12px; line-height: 1.15; word-break: break-word; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 		.meta-box.full .meta-value { overflow: visible; text-overflow: clip; white-space: normal; }
 		.meta-value.pipeline-lines { display: flex; flex-direction: column; gap: 3px; font: 12px/1.4 "Cascadia Mono", "Consolas", monospace; }
 		.meta-value.pipeline-lines .pipeline-line { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-		.device-config { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.06); position: relative; z-index: 1; }
+		.device-config { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.06); position: relative; z-index: 1; }
 		.device-config.collapsed { display: none; }
-		.device-log-panel { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.06); position: relative; z-index: 1; }
+		.device-log-panel { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.06); position: relative; z-index: 1; }
 		.device-log-panel.collapsed { display: none; }
 		.log-shell { border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; background: rgba(4, 8, 14, 0.72); padding: 12px; }
 		body.theme-light .log-shell { background: rgba(43, 38, 32, 0.06); }
 		.log-header { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 8px; }
 		.log-meta { font-size: 11px; color: var(--muted); }
 		.log-lines { margin: 0; min-height: 140px; max-height: 280px; overflow: auto; white-space: pre-wrap; font: 12px/1.45 "Cascadia Mono", "Consolas", monospace; color: var(--text); }
-		.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+		.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-bottom: 9px; }
 		.form-row.single { grid-template-columns: 1fr; }
 		.form-row.template-button-row .refresh-button { width: 100%; }
 		label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 5px; }
@@ -5259,6 +5859,8 @@ if ($action !== '') {
 			.hero { flex-direction: column; align-items: flex-start; }
 			.hero-right { align-items: flex-start; }
 			.form-row, .device-meta { grid-template-columns: 1fr; }
+			.device-title-line { flex-direction: column; align-items: flex-start; }
+			.state-pills { flex-wrap: wrap; justify-content: flex-start; white-space: normal; }
 			.shared-setting { flex-direction: column; align-items: stretch; }
 			.shared-setting label { min-width: 0; }
 		}
@@ -5415,6 +6017,10 @@ var recordingServersById = {};
 var openConfigPanelsByDevice = {};
 var openLogPanelsByDevice = {};
 var logContentByDevice = {};
+var radioPipeStatusByDevice = {};
+var radioPipeStatusProxyInFlightPromise = null;
+var radioPipeStatusProxyQueued = false;
+var RADIO_PIPE_STATUS_PROXY_POLL_MS = 1500;
 var queueStatusState = {
 	pending: 0,
 	busy: false,
@@ -5471,6 +6077,288 @@ function setStatus(message, isError)
 	var statusText = document.getElementById('statusText');
 	statusText.textContent = message;
 	statusText.style.color = isError ? 'var(--danger)' : 'var(--muted)';
+}
+
+function normalizeClientRmsDbValue(value)
+{
+	if (value === null || typeof value === 'undefined' || String(value).trim() === '') {
+		return null;
+	}
+
+	var numeric = Number(value);
+	if (!isFinite(numeric)) {
+		return null;
+	}
+
+	if (numeric < -200 || numeric > 30) {
+		return null;
+	}
+
+	return numeric;
+}
+
+function inferRxOpenReason(snapshot)
+{
+	var state = (snapshot && typeof snapshot === 'object') ? snapshot : {};
+	var gateReason = String(state.gateReason || '').trim().toLowerCase();
+	if (gateReason === 'dcs') {
+		return 'dcs';
+	}
+	if (gateReason === 'ctcss') {
+		return 'ctcss';
+	}
+	if (gateReason === 'silence') {
+		return 'audio';
+	}
+
+	var dcsGateEnabled = parseClientBooleanFlag(state.dcsGateEnabled, false);
+	var dcsGateState = String(state.dcsGate || '').trim().toLowerCase();
+	var dcsValue = String(state.dcs || '').trim();
+	if (dcsGateEnabled && dcsGateState === 'open' && dcsValue !== '') {
+		return 'dcs';
+	}
+
+	var ctcssGateEnabled = parseClientBooleanFlag(state.ctcssGateEnabled, false);
+	var ctcssGateState = String(state.ctcssGate || '').trim().toLowerCase();
+	var ctcssValue = String(state.ctcss || '').trim();
+	if (ctcssGateEnabled && ctcssGateState === 'open' && ctcssValue !== '') {
+		return 'ctcss';
+	}
+
+	if (parseClientBooleanFlag(state.audioDetected, false) || String(state.rmsGate || '').trim().toLowerCase() === 'open') {
+		return 'audio';
+	}
+
+	var previousReason = String(state.lastOpenReason || '').trim().toLowerCase();
+	if (previousReason === 'dcs' || previousReason === 'ctcss' || previousReason === 'audio') {
+		return previousReason;
+	}
+
+	return '';
+}
+
+function normalizeRadioPipeStatusSnapshot(payload, previousSnapshot)
+{
+	var previous = (previousSnapshot && typeof previousSnapshot === 'object') ? previousSnapshot : {};
+	var payloadHasOutputDb = Object.prototype.hasOwnProperty.call(payload, 'outputDb');
+	var payloadHasRmsDb = Object.prototype.hasOwnProperty.call(payload, 'rmsDb');
+	var payloadHasRms = Object.prototype.hasOwnProperty.call(payload, 'rms');
+	var rawOutputDb = payloadHasOutputDb
+		? payload.outputDb
+		: (payloadHasRmsDb
+			? payload.rmsDb
+			: (payloadHasRms
+				? payload.rms
+				: (typeof previous.outputDb !== 'undefined' ? previous.outputDb : previous.rmsDb)));
+	var rawRmsDb = payloadHasRmsDb
+		? payload.rmsDb
+		: (payloadHasRms ? payload.rms : previous.rmsDb);
+	var snapshot = {
+		hasStatus: true,
+		gate: String(payload.gate || previous.gate || '').trim().toLowerCase(),
+		gateReason: String(payload.gateReason || previous.gateReason || '').trim().toLowerCase(),
+		dcsGateEnabled: parseClientBooleanFlag(payload.dcsGateEnabled, parseClientBooleanFlag(previous.dcsGateEnabled, false)),
+		dcsGate: String(payload.dcsGate || previous.dcsGate || '').trim().toLowerCase(),
+		dcs: String(payload.dcs == null ? (previous.dcs || '') : payload.dcs).trim(),
+		ctcssGateEnabled: parseClientBooleanFlag(payload.ctcssGateEnabled, parseClientBooleanFlag(previous.ctcssGateEnabled, false)),
+		ctcssGate: String(payload.ctcssGate || previous.ctcssGate || '').trim().toLowerCase(),
+		ctcss: String(payload.ctcss == null ? (previous.ctcss || '') : payload.ctcss).trim(),
+		rmsDb: normalizeClientRmsDbValue(rawRmsDb),
+		outputDb: normalizeClientRmsDbValue(rawOutputDb),
+		rmsGate: String(payload.rmsGate || previous.rmsGate || '').trim().toLowerCase(),
+		audioDetected: parseClientBooleanFlag(payload.audioDetected, parseClientBooleanFlag(previous.audioDetected, false)),
+		lastOpenReason: String(previous.lastOpenReason || '').trim().toLowerCase(),
+		updatedAt: Date.now()
+	};
+
+	if (snapshot.gate === 'open') {
+		var openReason = inferRxOpenReason(snapshot);
+		if (openReason !== '') {
+			snapshot.lastOpenReason = openReason;
+		}
+	}
+
+	return snapshot;
+}
+
+function findDeviceCardById(deviceId)
+{
+	var normalizedDeviceId = normalizeClientDeviceId(String(deviceId || '').trim());
+	if (normalizedDeviceId === '') {
+		return null;
+	}
+
+	var cards = document.querySelectorAll('#deviceList .device-card');
+	for (var i = 0; i < cards.length; i++) {
+		var cardDeviceId = normalizeClientDeviceId(String(cards[i].getAttribute('data-device-id') || '').trim());
+		if (cardDeviceId === normalizedDeviceId) {
+			return cards[i];
+		}
+	}
+
+	return null;
+}
+
+function applyRxPillIndicator(deviceId)
+{
+	var normalizedDeviceId = normalizeClientDeviceId(String(deviceId || '').trim());
+	if (normalizedDeviceId === '') {
+		return;
+	}
+
+	var card = findDeviceCardById(normalizedDeviceId);
+	if (!card) {
+		return;
+	}
+
+	var pill = card.querySelector('.state-pill-rx');
+
+	var isRunning = !!knownInstancesByDevice[normalizedDeviceId];
+	if (pill) {
+		var indicator = getRxIndicator(normalizedDeviceId, isRunning, null);
+		pill.textContent = indicator.label;
+		pill.classList.remove('rx-active');
+		pill.classList.remove('rx-idle');
+		pill.classList.remove('rx-off');
+		pill.classList.add(indicator.className);
+	}
+
+	applyRmsBarIndicator(normalizedDeviceId, isRunning);
+}
+
+function applyRmsBarIndicator(deviceId, runningOverride)
+{
+	var normalizedDeviceId = normalizeClientDeviceId(String(deviceId || '').trim());
+	if (normalizedDeviceId === '') {
+		return;
+	}
+
+	var card = findDeviceCardById(normalizedDeviceId);
+	if (!card) {
+		return;
+	}
+
+	var isRunning = typeof runningOverride === 'boolean'
+		? runningOverride
+		: !!knownInstancesByDevice[normalizedDeviceId];
+	var rmsDbIndicator = getRmsDbIndicator(normalizedDeviceId, isRunning);
+	var outputIndicator = getRmsIndicator(normalizedDeviceId, isRunning);
+
+	var updateMeter = function (meterSelector, indicator) {
+		var meter = card.querySelector(meterSelector);
+		if (!meter) {
+			return;
+		}
+
+		var fill = meter.querySelector('.device-rms-fill');
+		var label = meter.querySelector('.device-rms-label');
+		if (!fill || !label) {
+			return;
+		}
+
+		label.textContent = indicator.label;
+		fill.style.width = String(indicator.percent.toFixed(1)) + '%';
+		meter.classList.remove('rms-off');
+		meter.classList.remove('rms-idle');
+		meter.classList.remove('rms-low');
+		meter.classList.remove('rms-mid');
+		meter.classList.remove('rms-high');
+		meter.classList.add(indicator.className);
+		meter.setAttribute('aria-label', indicator.label);
+	};
+
+	updateMeter('.device-rms-meter-rms', rmsDbIndicator);
+	updateMeter('.device-rms-meter-output', outputIndicator);
+}
+
+function pollRadioPipeStatusViaProxy()
+{
+	if (radioPipeStatusProxyInFlightPromise) {
+		radioPipeStatusProxyQueued = true;
+		return radioPipeStatusProxyInFlightPromise;
+	}
+
+	var runningDeviceIds = [];
+	var runningDeviceMap = {};
+	for (var deviceKey in knownInstancesByDevice) {
+		if (!Object.prototype.hasOwnProperty.call(knownInstancesByDevice, deviceKey)) {
+			continue;
+		}
+
+		var normalizedDeviceId = normalizeClientDeviceId(String(deviceKey || '').trim());
+		if (normalizedDeviceId === '' || runningDeviceMap[normalizedDeviceId]) {
+			continue;
+		}
+
+		runningDeviceMap[normalizedDeviceId] = true;
+		runningDeviceIds.push(normalizedDeviceId);
+	}
+
+	if (!runningDeviceIds.length) {
+		for (var staleDeviceId in radioPipeStatusByDevice) {
+			if (!Object.prototype.hasOwnProperty.call(radioPipeStatusByDevice, staleDeviceId)) {
+				continue;
+			}
+			delete radioPipeStatusByDevice[staleDeviceId];
+			applyRxPillIndicator(staleDeviceId);
+		}
+		return Promise.resolve();
+	}
+
+	radioPipeStatusProxyInFlightPromise = postAction(
+		'radio_pipe_status_batch',
+		{ devices: runningDeviceIds },
+		{ timeoutMs: Math.max(1200, Math.min(4000, REFRESH_REQUEST_TIMEOUT_MS)) }
+	).then(function (result) {
+		var statusesByDevice = (result && result.statuses && typeof result.statuses === 'object' && !Array.isArray(result.statuses))
+			? result.statuses
+			: {};
+
+		for (var i = 0; i < runningDeviceIds.length; i++) {
+			var runningDeviceId = runningDeviceIds[i];
+			var statusEntry = statusesByDevice[runningDeviceId];
+			var statusPayload = statusEntry && statusEntry.status && typeof statusEntry.status === 'object' && !Array.isArray(statusEntry.status)
+				? statusEntry.status
+				: null;
+
+			if (statusPayload) {
+				var previousSnapshot = radioPipeStatusByDevice[runningDeviceId] || null;
+				radioPipeStatusByDevice[runningDeviceId] = normalizeRadioPipeStatusSnapshot(statusPayload, previousSnapshot);
+			} else {
+				delete radioPipeStatusByDevice[runningDeviceId];
+			}
+
+			applyRxPillIndicator(runningDeviceId);
+		}
+
+		for (var trackedStatusDeviceId in radioPipeStatusByDevice) {
+			if (!Object.prototype.hasOwnProperty.call(radioPipeStatusByDevice, trackedStatusDeviceId)) {
+				continue;
+			}
+			if (!runningDeviceMap[trackedStatusDeviceId]) {
+				delete radioPipeStatusByDevice[trackedStatusDeviceId];
+				applyRxPillIndicator(trackedStatusDeviceId);
+			}
+		}
+		return null;
+	}).catch(function () {
+		return null;
+	}).finally(function () {
+		radioPipeStatusProxyInFlightPromise = null;
+		if (radioPipeStatusProxyQueued) {
+			radioPipeStatusProxyQueued = false;
+			window.setTimeout(function () {
+				pollRadioPipeStatusViaProxy();
+			}, 0);
+		}
+	});
+
+	return radioPipeStatusProxyInFlightPromise;
+}
+
+function syncRadioPipeSockets()
+{
+	pollRadioPipeStatusViaProxy();
 }
 
 function normalizeQueueStatusPayload(rawQueue)
@@ -8105,20 +8993,146 @@ function getRxIndicator(deviceId, isRunning, config)
 		return { label: 'Rx Off', className: 'rx-off' };
 	}
 
-	var cache = logContentByDevice[String(deviceId)] || null;
-	var lines = cache && Array.isArray(cache.lines) ? cache.lines : [];
-	// API log payloads are ordered newest-first, so the first matching marker is the latest state.
-	for (var i = 0; i < lines.length; i++) {
-		var upper = String(lines[i] || '').toUpperCase();
-		if (upper.indexOf('[RECORD]') !== -1 && upper.indexOf('AUDIO DETECTED') !== -1) {
-			return { label: 'Rx Active', className: 'rx-active' };
-		}
-		if (upper.indexOf('[SILENCE]') !== -1) {
-			return { label: 'Rx Idle', className: 'rx-idle' };
+	var snapshot = radioPipeStatusByDevice[String(deviceId)] || null;
+	if (!snapshot || !snapshot.hasStatus) {
+		return { label: 'Rx Idle', className: 'rx-idle' };
+	}
+
+	var gateState = String(snapshot.gate || '').trim().toLowerCase();
+	if (gateState !== 'open') {
+		return { label: 'Rx Idle', className: 'rx-idle' };
+	}
+
+	var openReason = inferRxOpenReason(snapshot);
+	if (openReason === 'dcs') {
+		return { label: 'Rx DCS', className: 'rx-active' };
+	}
+	if (openReason === 'ctcss') {
+		return { label: 'Rx CTCSS', className: 'rx-active' };
+	}
+
+	return { label: 'Rx Audio', className: 'rx-active' };
+}
+
+function getConfiguredSilenceFloorDb(deviceId)
+{
+	var normalizedDeviceId = normalizeClientDeviceId(String(deviceId || '').trim());
+	if (normalizedDeviceId === '') {
+		return -100;
+	}
+
+	var resolvedThreshold = null;
+	var instance = knownInstancesByDevice[normalizedDeviceId] || null;
+	if (instance && instance.config && typeof instance.config === 'object' && !Array.isArray(instance.config)) {
+		var instanceThreshold = Number(instance.config.threshold);
+		if (isFinite(instanceThreshold)) {
+			resolvedThreshold = instanceThreshold;
 		}
 	}
 
-	return { label: 'Rx Idle', className: 'rx-idle' };
+	if (resolvedThreshold === null) {
+		var config = getConfigForDevice(normalizedDeviceId);
+		if (config && typeof config === 'object' && !Array.isArray(config)) {
+			var configThreshold = Number(config.threshold);
+			if (isFinite(configThreshold)) {
+				resolvedThreshold = configThreshold;
+			}
+		}
+	}
+
+	if (resolvedThreshold === null) {
+		return -100;
+	}
+
+	return Math.max(-120, Math.min(0, resolvedThreshold));
+}
+
+function getRmsDbIndicator(deviceId, isRunning)
+{
+	if (!isRunning) {
+		return { label: 'RMS Off', className: 'rms-off', percent: 0 };
+	}
+
+	var snapshot = radioPipeStatusByDevice[String(deviceId)] || null;
+	if (!snapshot || !snapshot.hasStatus) {
+		return { label: 'RMS --', className: 'rms-idle', percent: 0 };
+	}
+
+	var rmsDb = normalizeClientRmsDbValue(snapshot.rmsDb);
+	if (rmsDb === null) {
+		return { label: 'RMS --', className: 'rms-idle', percent: 0 };
+	}
+
+	var minRmsDb = getConfiguredSilenceFloorDb(deviceId);
+	var maxRmsDb = -25;
+	if (maxRmsDb <= minRmsDb) {
+		maxRmsDb = minRmsDb + 1;
+	}
+	var normalized = (rmsDb - minRmsDb) / (maxRmsDb - minRmsDb);
+	if (!isFinite(normalized)) {
+		normalized = 0;
+	}
+
+	var percent = Math.max(0, Math.min(1, normalized)) * 100;
+	var className = 'rms-low';
+	if (percent >= 66) {
+		className = 'rms-high';
+	} else if (percent >= 33) {
+		className = 'rms-mid';
+	}
+
+	return {
+		label: 'RMS ' + rmsDb.toFixed(1) + ' dB',
+		className: className,
+		percent: percent
+	};
+}
+
+function getRmsIndicator(deviceId, isRunning)
+{
+	if (!isRunning) {
+		return { label: 'Out Off', className: 'rms-off', percent: 0 };
+	}
+
+	var snapshot = radioPipeStatusByDevice[String(deviceId)] || null;
+	if (!snapshot || !snapshot.hasStatus) {
+		return { label: 'Out --', className: 'rms-idle', percent: 0 };
+	}
+
+	// Prefer outputDb if present, else rmsDb
+	var rmsDb = null;
+	if (typeof snapshot.outputDb !== 'undefined' && snapshot.outputDb !== null) {
+		rmsDb = normalizeClientRmsDbValue(snapshot.outputDb);
+	} else {
+		rmsDb = normalizeClientRmsDbValue(snapshot.rmsDb);
+	}
+	if (rmsDb === null) {
+		return { label: 'Out --', className: 'rms-idle', percent: 0 };
+	}
+
+	var minRmsDb = getConfiguredSilenceFloorDb(deviceId);
+	var maxRmsDb = -25;
+	if (maxRmsDb <= minRmsDb) {
+		maxRmsDb = minRmsDb + 1;
+	}
+	var normalized = (rmsDb - minRmsDb) / (maxRmsDb - minRmsDb);
+	if (!isFinite(normalized)) {
+		normalized = 0;
+	}
+
+	var percent = Math.max(0, Math.min(1, normalized)) * 100;
+	var className = 'rms-low';
+	if (percent >= 66) {
+		className = 'rms-high';
+	} else if (percent >= 33) {
+		className = 'rms-mid';
+	}
+
+	return {
+		label: 'Out ' + rmsDb.toFixed(1) + ' dB',
+		className: className,
+		percent: percent
+	};
 }
 
 function getConfigForDevice(deviceId)
@@ -8519,6 +9533,10 @@ function renderDeviceList()
 		var stateClass = isRunning ? 'running' : 'stopped';
 		var stateLabel = isRunning ? (isBothMode ? 'Rec+Stream' : (isStreamMode ? 'Streaming' : 'Recording')) : 'Stopped';
 		var rxIndicator = getRxIndicator(deviceId, isRunning, config);
+		var rmsDbIndicator = getRmsDbIndicator(deviceId, isRunning);
+		var rmsDbPercentText = isFinite(rmsDbIndicator.percent) ? String(rmsDbIndicator.percent.toFixed(1)) : '0.0';
+		var outputIndicator = getRmsIndicator(deviceId, isRunning);
+		var outputPercentText = isFinite(outputIndicator.percent) ? String(outputIndicator.percent.toFixed(1)) : '0.0';
 		var metaPid = isRunning ? String(instance.pid || '') : 'Idle';
 		var metaLog = isRunning ? String(instance.logFile || '') : 'No active log';
 		var configPanelClass = isConfigOpen(deviceId) ? 'device-config' : 'device-config collapsed';
@@ -8550,10 +9568,10 @@ function renderDeviceList()
 			'<button type="button" class="refresh-button action-copy-stream"' + copyControlDisabledAttr + copyControlDisabledTitleAttr + '>Copy Stream URL</button>' +
 			'<button type="button" class="' + listenButtonClass + '"' + listenControlDisabledAttr + listenControlDisabledTitleAttr + '>' + listenButtonLabel + '</button>';
 		var streamNameValue = String(config.streamName || '').trim();
-		if (streamNameValue === '') {
-			streamNameValue = '(untitled)';
+		var deviceTitleText = 'Dev ' + displayIndex;
+		if (streamNameValue !== '') {
+			deviceTitleText += ' - ' + streamNameValue;
 		}
-		var streamNameRow = '<div class="device-stream-name">' + escapeHtml(streamNameValue) + '</div>';
 		var mountLinkMode = resolveMountLinkModeForConfig(config, String(config.deviceIndex || displayIndex));
 		var mountFollowDevice = mountLinkMode === 'device';
 		var mountPlaceholder = mountFollowDevice
@@ -8586,13 +9604,24 @@ function renderDeviceList()
 			'<article class="panel device-card" data-device-id="' + escapeHtml(deviceId) + '">' +
 				'<div class="device-header">' +
 					'<div class="device-title-row">' +
-						'<h3 class="device-title">Dev ' + escapeHtml(displayIndex) + '</h3>' +
+						'<div class="device-title-line">' +
+							'<h3 class="device-title">' + escapeHtml(deviceTitleText) + '</h3>' +
+							'<div class="state-pills">' +
+								'<div class="state-pill ' + stateClass + '">' + stateLabel + '</div>' +
+								'<div class="state-pill state-pill-rx ' + rxIndicator.className + '">' + rxIndicator.label + '</div>' +
+							'</div>' +
+						'</div>' +
+						'<div class="device-rms-stack">' +
+							'<div class="device-rms-meter device-rms-meter-rms ' + rmsDbIndicator.className + '" aria-label="' + escapeHtml(rmsDbIndicator.label) + '">' +
+								'<div class="device-rms-track"><div class="device-rms-fill" style="width:' + escapeHtml(rmsDbPercentText) + '%;"></div></div>' +
+								'<div class="device-rms-label">' + escapeHtml(rmsDbIndicator.label) + '</div>' +
+							'</div>' +
+							'<div class="device-rms-meter device-rms-meter-output ' + outputIndicator.className + '" aria-label="' + escapeHtml(outputIndicator.label) + '">' +
+								'<div class="device-rms-track"><div class="device-rms-fill" style="width:' + escapeHtml(outputPercentText) + '%;"></div></div>' +
+								'<div class="device-rms-label">' + escapeHtml(outputIndicator.label) + '</div>' +
+							'</div>' +
+						'</div>' +
 					'</div>' +
-					'<div class="state-pills">' +
-						'<div class="state-pill ' + stateClass + '">' + stateLabel + '</div>' +
-						'<div class="state-pill ' + rxIndicator.className + '">' + rxIndicator.label + '</div>' +
-					'</div>' +
-					streamNameRow +
 					'<div class="device-subtitle">' + escapeHtml(String(device.label || ('RTL-SDR Device ' + displayIndex))) + '</div>' +
 					'<div class="device-antenna-row"><div class="device-antenna-label">' + escapeHtml(antennaLabelText) + '</div><button type="button" class="refresh-button compact action-edit-antenna"' + antennaEditDisabledAttr + antennaEditTitleAttr + '>' + (antennaSerial === '' ? 'Unavailable' : antennaEditLabel) + '</button></div>' +
 				'</div>' +
@@ -8718,6 +9747,7 @@ function renderDeviceList()
 
 	refreshTemplateDeviceSelector();
 	updateSummary();
+	syncRadioPipeSockets();
 }
 
 function buildStreamServerOptions(selectedServerId)
@@ -9094,21 +10124,21 @@ function refreshOpenLogs(skipRender)
 		return refreshOpenLogsInFlightPromise;
 	}
 
-	var visibleDeviceIds = [];
+	var openLogDeviceIds = [];
 	var visibleDevices = collectVisibleDevices();
 	for (var i = 0; i < visibleDevices.length; i++) {
 		var visibleId = normalizeClientDeviceId(visibleDevices[i].id || visibleDevices[i].index || '');
-		if (visibleId !== '') {
-			visibleDeviceIds.push(visibleId);
+		if (visibleId !== '' && isLogOpen(visibleId)) {
+			openLogDeviceIds.push(visibleId);
 		}
 	}
-	if (!visibleDeviceIds.length) {
+	if (!openLogDeviceIds.length) {
 		refreshOpenLogsRenderRequested = false;
 		refreshOpenLogsQueued = false;
 		return Promise.resolve();
 	}
 
-	refreshOpenLogsInFlightPromise = fetchDeviceLogsBatch(visibleDeviceIds).then(function () {
+	refreshOpenLogsInFlightPromise = fetchDeviceLogsBatch(openLogDeviceIds).then(function () {
 		if (!refreshOpenLogsRenderRequested || shouldPauseAutoRefreshRender()) {
 			return;
 		}
@@ -9249,8 +10279,12 @@ function bindDeviceCard(card)
 	});
 
 	card.querySelector('.action-toggle-log').addEventListener('click', function () {
-		openLogPanelsByDevice[deviceId] = !isLogOpen(deviceId);
+		var nextOpenState = !isLogOpen(deviceId);
+		openLogPanelsByDevice[deviceId] = nextOpenState;
 		renderDeviceList();
+		if (nextOpenState) {
+			refreshOpenLogs(false);
+		}
 	});
 
 	var downloadLogButton = card.querySelector('.action-download-log');
@@ -9604,6 +10638,7 @@ function refreshInstances()
 		for (var i = 0; i < result.instances.length; i++) {
 			knownInstancesByDevice[String(result.instances[i].device)] = result.instances[i];
 		}
+		syncRadioPipeSockets();
 		applyUiSettingsFromServerPayload(result && result.settings ? result.settings : null);
 		updateQueueStatusFromServer(result && result.queue ? result.queue : null);
 		var pauseAutoRender = shouldPauseAutoRefreshRender();
@@ -9655,6 +10690,7 @@ function startOrRetuneCard(card)
 		for (var i = 0; i < result.instances.length; i++) {
 			knownInstancesByDevice[String(result.instances[i].device)] = result.instances[i];
 		}
+		syncRadioPipeSockets();
 		fetchDeviceLogs(String(config.device), true).then(function () {
 			renderDeviceList();
 		});
@@ -9684,6 +10720,7 @@ function stopCard(card)
 		for (var i = 0; i < result.instances.length; i++) {
 			knownInstancesByDevice[String(result.instances[i].device)] = result.instances[i];
 		}
+		syncRadioPipeSockets();
 		logContentByDevice[deviceId] = { logFile: '', lines: ['Device stopped.'], running: false };
 		renderDeviceList();
 	}).catch(function (error) {
@@ -9730,6 +10767,7 @@ function clearConfigForCard(card)
 		for (var i = 0; i < result.instances.length; i++) {
 			knownInstancesByDevice[String(result.instances[i].device)] = result.instances[i];
 		}
+		syncRadioPipeSockets();
 		logContentByDevice[deviceId] = { logFile: '', lines: ['Device stopped and config reset to defaults.'], running: false };
 		resetToDefaults();
 		setStatus('Stopped device ' + deviceId + ' and reset config to defaults.', false);
@@ -9756,6 +10794,7 @@ function stopDeviceById(deviceId)
 		for (var i = 0; i < result.instances.length; i++) {
 			knownInstancesByDevice[String(result.instances[i].device)] = result.instances[i];
 		}
+		syncRadioPipeSockets();
 		renderDeviceList();
 	}).catch(function (error) {
 		setStatus(error.message, true);
@@ -9798,6 +10837,7 @@ function initializePage()
 		postUserAction('stop_all', {}).then(function (result) {
 			setStatus(result.message || 'Stopped all.', false);
 			knownInstancesByDevice = {};
+			syncRadioPipeSockets();
 			renderDeviceList();
 		}).catch(function (error) {
 			setStatus(error.message, true);
@@ -9879,6 +10919,7 @@ function initializePage()
 				for (var n = 0; n < latestInstances.length; n++) {
 					knownInstancesByDevice[String(latestInstances[n].device)] = latestInstances[n];
 				}
+				syncRadioPipeSockets();
 			}
 			renderDeviceList();
 
@@ -10052,6 +11093,7 @@ function initializePage()
 	});
 	window.setInterval(refreshInstances, 6000);
 	window.setInterval(refreshOpenLogs, 2500);
+	window.setInterval(pollRadioPipeStatusViaProxy, RADIO_PIPE_STATUS_PROXY_POLL_MS);
 }
 
 initializePage();

@@ -393,50 +393,40 @@ public class StreamRecorder {
                 false);
 
         try (AudioInputStream din = AudioSystem.getAudioInputStream(decodedFormat, audio)) {
-            if (AudioSystem.isConversionSupported(outputFormat, decodedFormat)) {
-                try (AudioInputStream converted = AudioSystem.getAudioInputStream(outputFormat, din)) {
-                    log("READY", ANSI_GREEN,
-                            String.format(
-                                    "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
-                                    outputFormat.getSampleRate(),
-                                    outputFormat.getChannels(),
-                                    outputFormat.getSampleSizeInBits(),
-                                    silenceThresholdDb,
-                                    silenceDurationSeconds));
-                    logDcsConfiguration();
-                    logCtcssConfiguration();
-                    logStdoutConfiguration(outputFormat);
-                    processStream(converted, outputFormat);
-                }
-            } else {
+            boolean outputConversionSupported = AudioSystem.isConversionSupported(outputFormat, decodedFormat);
+            if (!outputConversionSupported) {
                 log("FORMAT", ANSI_YELLOW,
                         "Requested output format is not supported by this JVM; using decoded stream format.");
-                log("READY", ANSI_GREEN,
-                        String.format(
-                                "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
-                                decodedFormat.getSampleRate(),
-                                decodedFormat.getChannels(),
-                                decodedFormat.getSampleSizeInBits(),
-                                silenceThresholdDb,
-                                silenceDurationSeconds));
-                logDcsConfiguration();
-                logCtcssConfiguration();
-                logStdoutConfiguration(decodedFormat);
-                processStream(din, decodedFormat);
             }
+            AudioFormat activeOutputFormat = outputConversionSupported ? outputFormat : decodedFormat;
+            log("READY", ANSI_GREEN,
+                    String.format(
+                            "Monitoring audio at %.0f Hz, %d channel(s), %d-bit; clip output %.0f Hz, %d channel(s), %d-bit; silence threshold %.1f dB for %.1f s",
+                            decodedFormat.getSampleRate(),
+                            decodedFormat.getChannels(),
+                            decodedFormat.getSampleSizeInBits(),
+                            activeOutputFormat.getSampleRate(),
+                            activeOutputFormat.getChannels(),
+                            activeOutputFormat.getSampleSizeInBits(),
+                            silenceThresholdDb,
+                            silenceDurationSeconds));
+            logDcsConfiguration();
+            logCtcssConfiguration();
+            logStdoutConfiguration(activeOutputFormat);
+            processStream(din, decodedFormat, activeOutputFormat);
         }
     }
 
-    private void processStream(AudioInputStream din, AudioFormat format) throws IOException {
-        int frameSize = format.getFrameSize();
-        float frameRate = format.getFrameRate() > 0 ? format.getFrameRate() : format.getSampleRate();
+    private void processStream(AudioInputStream din, AudioFormat processingFormat, AudioFormat clipOutputFormat) throws IOException {
+        int frameSize = processingFormat.getFrameSize();
+        float frameRate = processingFormat.getFrameRate() > 0 ? processingFormat.getFrameRate() : processingFormat.getSampleRate();
         long framesForSilence = (long) (silenceDurationSeconds * frameRate);
         boolean dcsGateEnabled = (this.requiredDcsCode != null);
         boolean ctcssGateEnabled = (this.requiredCtcssToneHz != null);
-        DcsDetector dcsStatusDetector = new DcsDetector(format);
-        CtcssDetector ctcssStatusDetector = new CtcssDetector(format);
-        DcsDetector dcsGateDetector = dcsGateEnabled ? new DcsDetector(format, this.requiredDcsCode) : null;
-        CtcssDetector ctcssGateDetector = ctcssGateEnabled ? new CtcssDetector(format, this.requiredCtcssToneHz) : null;
+        DcsDetector dcsStatusDetector = new DcsDetector(processingFormat);
+        CtcssDetector ctcssStatusDetector = new CtcssDetector(processingFormat);
+        DcsDetector dcsGateDetector = dcsGateEnabled ? new DcsDetector(processingFormat, this.requiredDcsCode) : null;
+        CtcssDetector ctcssGateDetector = ctcssGateEnabled ? new CtcssDetector(processingFormat, this.requiredCtcssToneHz) : null;
         boolean dcsGateOpen = !dcsGateEnabled;
         boolean ctcssGateOpen = !ctcssGateEnabled;
         long gateHoldNanos = (this.gateHoldSeconds <= 0.0)
@@ -456,6 +446,7 @@ public class StreamRecorder {
         double statusOutputDb = -100.0; // RMS level after all gates
         boolean statusGateOpen = false;
         String statusGateReason = "silence";
+        String lastGateOpenReason = "silence";
         long statusGateSinceNanos = statusClockNanos;
         boolean statusAudioDetected = false;
         long statusAudioDetectedSinceNanos = statusClockNanos;
@@ -576,7 +567,7 @@ public class StreamRecorder {
                     int padBytes = padFramesPerTick * frameSize;
                     byte[] padSilence = new byte[padBytes];
                     stdoutPadBuffer.addLast(padSilence);
-                    drainStdoutPadBuffer(stdoutPadBuffer, padBytes, format);
+                    drainStdoutPadBuffer(stdoutPadBuffer, padBytes, processingFormat);
 
                     if (activelyRecording) {
                         chunk.write(padSilence, 0, padBytes);
@@ -593,10 +584,10 @@ public class StreamRecorder {
                         double soundSeconds = soundFrames / frameRate;
                         if (soundSeconds > 1.0) {
                             if (canWriteRecordings()) {
-                                writeChunk(clipAudio, format, chunkStartTime);
+                                writeChunk(clipAudio, processingFormat, clipOutputFormat, chunkStartTime);
                             }
                             if (this.stdoutEnabled && !this.stdoutRawMode) {
-                                writeChunkToStdoutWav(clipAudio, format);
+                                writeChunkToStdoutWav(clipAudio, processingFormat, clipOutputFormat);
                             }
                         } else {
                             log("RECORD", ANSI_YELLOW,
@@ -635,22 +626,22 @@ public class StreamRecorder {
                         statusDetectedCtcssLabel,
                         this.streamUrl,
                         this.stdinMode,
-                        format,
+                        processingFormat,
                         this.baseDir);
                 continue;
             }
 
-            boolean isSilent = isSilent(currentBuffer, n, format);
-            double currentRmsDb = calculateRmsDb(currentBuffer, n, format);
+            boolean isSilent = isSilent(currentBuffer, n, processingFormat);
+            double currentRmsDb = calculateRmsDb(currentBuffer, n, processingFormat);
             statusRmsDb = currentRmsDb;  // track current RMS level
             long nowNanos = System.nanoTime();
 
-            dcsStatusDetector.consume(currentBuffer, n, format);
+            dcsStatusDetector.consume(currentBuffer, n, processingFormat);
             Integer detectedDcsCode = dcsStatusDetector.getDetectedCode();
             statusDetectedDcsLabel = (detectedDcsCode == null) ? null : formatDcsCode(detectedDcsCode.intValue());
             statusDetectedDcsPolarity = (detectedDcsCode == null) ? null : dcsStatusDetector.getPolarityLabel();
 
-            boolean dcsRawMatch = !dcsGateEnabled || dcsGateDetector.consume(currentBuffer, n, format);
+            boolean dcsRawMatch = !dcsGateEnabled || dcsGateDetector.consume(currentBuffer, n, processingFormat);
             if (dcsGateEnabled && dcsRawMatch && gateHoldNanos > 0L) {
                 long holdUntil = nowNanos + gateHoldNanos;
                 dcsGateHoldUntilNanos = (holdUntil < 0L) ? Long.MAX_VALUE : holdUntil;
@@ -660,11 +651,11 @@ public class StreamRecorder {
                 dcsMatch = true;
             }
 
-            ctcssStatusDetector.consume(currentBuffer, n, format);
+            ctcssStatusDetector.consume(currentBuffer, n, processingFormat);
             Double detectedCtcssTone = ctcssStatusDetector.getDetectedToneHz();
             statusDetectedCtcssLabel = (detectedCtcssTone == null) ? null : formatCtcssTone(detectedCtcssTone.doubleValue());
 
-            boolean ctcssRawMatch = !ctcssGateEnabled || ctcssGateDetector.consume(currentBuffer, n, format);
+            boolean ctcssRawMatch = !ctcssGateEnabled || ctcssGateDetector.consume(currentBuffer, n, processingFormat);
             if (ctcssGateEnabled && ctcssRawMatch && gateHoldNanos > 0L) {
                 long holdUntil = nowNanos + gateHoldNanos;
                 ctcssGateHoldUntilNanos = (holdUntil < 0L) ? Long.MAX_VALUE : holdUntil;
@@ -721,16 +712,21 @@ public class StreamRecorder {
 
             String currentGateBlockReason = determineGateBlockReason(isSilent, dcsMatch, ctcssMatch);
             boolean currentGateOpen = (currentGateBlockReason == null);
-            if (statusGateOpen != currentGateOpen || !sameNullableText(statusGateReason, currentGateBlockReason)) {
+            if (statusGateOpen != currentGateOpen) {
                 if (currentGateOpen) {
-                    publishEvent("gateOpen", "reason", (statusGateReason == null) ? "none" : statusGateReason);
+                    String gateOpenReason = (statusGateReason == null) ? "none" : statusGateReason;
+                    publishEvent("gateOpen", "reason", gateOpenReason);
+                    lastGateOpenReason = gateOpenReason;
                 } else {
-                    publishEvent("gateClosed", "reason", currentGateBlockReason);
+                    publishEvent("gateClosed", "reason", lastGateOpenReason);
                 }
-                statusGateOpen = currentGateOpen;
-                statusGateReason = currentGateBlockReason;
+            }
+
+            if (statusGateOpen != currentGateOpen || !sameNullableText(statusGateReason, currentGateBlockReason)) {
                 statusGateSinceNanos = nowNanos;
             }
+            statusGateOpen = currentGateOpen;
+            statusGateReason = currentGateBlockReason;
 
             boolean gateAllowsAudio = !isSilent && dcsMatch && ctcssMatch;
             statusOutputDb = gateAllowsAudio ? currentRmsDb : -100.0;
@@ -761,7 +757,7 @@ public class StreamRecorder {
                     statusDetectedCtcssLabel,
                     this.streamUrl,
                     this.stdinMode,
-                    format,
+                    processingFormat,
                     this.baseDir);
             boolean includeFrameInClip = gateAllowsAudio || activelyRecording;
             if (this.stdoutEnabled && this.stdoutRawMode) {
@@ -770,9 +766,9 @@ public class StreamRecorder {
                             ? Arrays.copyOf(currentBuffer, n)
                             : new byte[n];
                     stdoutPadBuffer.addLast(stdoutFrame);
-                    drainStdoutPadBuffer(stdoutPadBuffer, n, format);
+                    drainStdoutPadBuffer(stdoutPadBuffer, n, processingFormat);
                 } else if (includeFrameInClip) {
-                    writeStdoutRaw(currentBuffer, n, format);
+                    writeStdoutRaw(currentBuffer, n, processingFormat);
                 }
             }
 
@@ -803,10 +799,10 @@ public class StreamRecorder {
                     double soundSeconds = soundFrames / frameRate;
                     if (soundSeconds > 1.0) { // only keep clips that have at least 1 second of sound
                         if (canWriteRecordings()) {
-                            writeChunk(clipAudio, format, chunkStartTime);
+                            writeChunk(clipAudio, processingFormat, clipOutputFormat, chunkStartTime);
                         }
                         if (this.stdoutEnabled && !this.stdoutRawMode) {
-                            writeChunkToStdoutWav(clipAudio, format);
+                            writeChunkToStdoutWav(clipAudio, processingFormat, clipOutputFormat);
                         }
                     } else {
                         log("RECORD", ANSI_YELLOW,
@@ -826,10 +822,10 @@ public class StreamRecorder {
             double soundSeconds = soundFrames / frameRate;
             if (soundSeconds > 1.0) {
                 if (canWriteRecordings()) {
-                    writeChunk(clipAudio, format, chunkStartTime);
+                    writeChunk(clipAudio, processingFormat, clipOutputFormat, chunkStartTime);
                 }
                 if (this.stdoutEnabled && !this.stdoutRawMode) {
-                    writeChunkToStdoutWav(clipAudio, format);
+                    writeChunkToStdoutWav(clipAudio, processingFormat, clipOutputFormat);
                 }
             } else {
                 log("RECORD", ANSI_YELLOW,
@@ -893,15 +889,16 @@ public class StreamRecorder {
         this.stdoutConfigLogged = true;
     }
 
-    private void writeChunkToStdoutWav(byte[] audioData, AudioFormat format) {
-        try (ByteArrayInputStream bais = new ByteArrayInputStream(audioData);
-             AudioInputStream ais = new AudioInputStream(bais, format, audioData.length / format.getFrameSize())) {
+    private void writeChunkToStdoutWav(byte[] audioData, AudioFormat sourceFormat, AudioFormat targetFormat) {
+        try (AudioInputStream ais = openClipStream(audioData, sourceFormat, targetFormat)) {
             synchronized (System.out) {
                 AudioSystem.write(ais, AudioFileFormat.Type.WAVE, System.out);
                 System.out.flush();
             }
         } catch (IOException ioe) {
             logError("Failed to write WAV clip to stdout: " + ioe.getMessage());
+        } catch (UnsupportedAudioFileException uafe) {
+            logError("Failed to convert WAV clip for stdout: " + uafe.getMessage());
         }
     }
 
@@ -1038,7 +1035,7 @@ public class StreamRecorder {
         return db;
     }
 
-    private void writeChunk(byte[] audioData, AudioFormat format, long startTimeMs) {
+    private void writeChunk(byte[] audioData, AudioFormat sourceFormat, AudioFormat targetFormat, long startTimeMs) {
         if (!canWriteRecordings()) {
             return;
         }
@@ -1052,8 +1049,7 @@ public class StreamRecorder {
             Files.createDirectories(dateDir);
             String name = formattedDate + "_" + time.format(TIME_FMT) + "_" + streamLabel + ".wav";
             Path out = dateDir.resolve(name);
-            try (ByteArrayInputStream bais = new ByteArrayInputStream(audioData);
-                 AudioInputStream ais = new AudioInputStream(bais, format, audioData.length / format.getFrameSize())) {
+            try (AudioInputStream ais = openClipStream(audioData, sourceFormat, targetFormat)) {
                 AudioSystem.write(ais, AudioFileFormat.Type.WAVE, out.toFile());
             }
             try {
@@ -1066,9 +1062,45 @@ public class StreamRecorder {
                     "filename", out.toAbsolutePath().normalize().toString());
             log("WRITE", ANSI_GREEN, "Saved clip: " + out);
             runOnWriteProgram(out.toAbsolutePath());
+        } catch (UnsupportedAudioFileException uafe) {
+            logError("Failed to convert chunk for output: " + uafe.getMessage());
         } catch (IOException ioe) {
             logError("Failed to write chunk: " + ioe.getMessage());
             ioe.printStackTrace(System.err);
+        }
+    }
+
+    private AudioInputStream openClipStream(byte[] audioData,
+                                            AudioFormat sourceFormat,
+                                            AudioFormat targetFormat) throws UnsupportedAudioFileException, IOException {
+        ByteArrayInputStream bais = new ByteArrayInputStream(audioData);
+        AudioInputStream source = new AudioInputStream(bais, sourceFormat, audioData.length / sourceFormat.getFrameSize());
+
+        if (audioFormatsEquivalent(sourceFormat, targetFormat)) {
+            return source;
+        }
+
+        if (!AudioSystem.isConversionSupported(targetFormat, sourceFormat)) {
+            source.close();
+            throw new UnsupportedAudioFileException("unsupported conversion from "
+                    + describeAudioFormat(sourceFormat)
+                    + " to "
+                    + describeAudioFormat(targetFormat));
+        }
+
+        try {
+            return AudioSystem.getAudioInputStream(targetFormat, source);
+        } catch (Exception conversionException) {
+            source.close();
+            if (conversionException instanceof UnsupportedAudioFileException) {
+                throw (UnsupportedAudioFileException) conversionException;
+            }
+            if (conversionException instanceof IOException) {
+                throw (IOException) conversionException;
+            }
+            UnsupportedAudioFileException wrapped = new UnsupportedAudioFileException(conversionException.getMessage());
+            wrapped.initCause(conversionException);
+            throw wrapped;
         }
     }
 
@@ -1393,10 +1425,10 @@ public class StreamRecorder {
         double audioDetectedSecondsValue = Double.parseDouble(formatDurationSeconds(audioDetectedSinceNanos, nowNanos));
         List<String> audioReasonValue = new ArrayList<>(3);
         if (gateOpen) {
-            if (dcsGateOpen) {
+            if (dcsGateEnabled && dcsGateOpen) {
                 audioReasonValue.add("dcs");
             }
-            if (ctcssGateOpen) {
+            if (ctcssGateEnabled && ctcssGateOpen) {
                 audioReasonValue.add("ctcss");
             }
             if (rmsGateOpen) {

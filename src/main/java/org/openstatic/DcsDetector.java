@@ -8,15 +8,21 @@ public final class DcsDetector {
     private static final int CODEWORD_MASK = 0x7FFFFF;
     private static final int GOLAY_POLY = 0xC75;
     private static final int NO_CODE = -1;
+    private static final int CONFIRM_SCORE_THRESHOLD = 4;
+    private static final int MAX_CONFIDENCE_SCORE = 8;
     private static final long PLL_PHASE_MASK = 0xFFFFFFFFL;
     private static final long PLL_PHASE_MIDPOINT = 0x80000000L;
     private static final long PLL_PHASE_WRAP = 0x1_0000_0000L;
-    private static final double FILTER_CUTOFF_HZ = 300.0;
-    private static final double COMPARATOR_THRESHOLD = 500.0 / 32768.0;
+    private static final double FILTER_CUTOFF_HZ = 180.0;
+    private static final double DC_BLOCKER_R = 0.995;
+    private static final double COMPARATOR_FLOOR_THRESHOLD = 250.0 / 32768.0;
+    private static final double COMPARATOR_THRESHOLD_RATIO = 0.45;
+    private static final double COMPARATOR_HYSTERESIS_RATIO = 0.20;
 
     private final Integer targetCode;
     private final long pllIncrement;
     private final long holdSamples;
+    private final double envelopeAlpha;
     private final double b0;
     private final double b1;
     private final double b2;
@@ -26,15 +32,18 @@ public final class DcsDetector {
     private double x2;
     private double y1;
     private double y2;
+    private double dcBlockPreviousInput;
+    private double dcBlockPreviousOutput;
+    private double comparatorEnvelope;
     private int lastComparatorBit;
     private int previousInputBit;
     private long pllPhase;
     private int shiftRegister;
     private long totalBits;
-    private int matchCount;
+    private int confidenceScore;
     private int bitsSinceMatch;
-    private int matchedCode;
-    private int matchedPolarity;
+    private int candidateCode;
+    private int candidatePolarity;
     private int lastDetectedCode;
     private int lastPolarity;
     private long sampleCursor;
@@ -55,8 +64,8 @@ public final class DcsDetector {
 
         this.targetCode = (targetCode == null) ? null : Integer.valueOf(targetCode.intValue() & 0x1FF);
         this.bitsSinceMatch = -1;
-        this.matchedCode = NO_CODE;
-        this.matchedPolarity = -1;
+        this.candidateCode = NO_CODE;
+        this.candidatePolarity = -1;
         this.lastDetectedCode = NO_CODE;
         this.lastPolarity = -1;
         this.lastConfirmedSample = Long.MIN_VALUE;
@@ -75,6 +84,7 @@ public final class DcsDetector {
         this.pllIncrement = Math.max(1L,
                 Math.round((BITRATE / sampleRate) * PLL_PHASE_WRAP));
         this.holdSamples = Math.max(1L, Math.round(sampleRate));
+        this.envelopeAlpha = Math.max(0.0005, Math.min(0.05, 1.0 / (sampleRate * 0.05)));
     }
 
     public boolean consume(byte[] data, int len, AudioFormat format) {
@@ -133,14 +143,18 @@ public final class DcsDetector {
     }
 
     private void processSample(double sample) {
-        double filtered = (this.b0 * sample)
+        double dcBlocked = sample - this.dcBlockPreviousInput + (DC_BLOCKER_R * this.dcBlockPreviousOutput);
+        this.dcBlockPreviousInput = sample;
+        this.dcBlockPreviousOutput = dcBlocked;
+
+        double filtered = (this.b0 * dcBlocked)
                 + (this.b1 * this.x1)
                 + (this.b2 * this.x2)
                 - (this.a1 * this.y1)
                 - (this.a2 * this.y2);
 
         this.x2 = this.x1;
-        this.x1 = sample;
+        this.x1 = dcBlocked;
         this.y2 = this.y1;
         this.y1 = filtered;
 
@@ -165,10 +179,22 @@ public final class DcsDetector {
     }
 
     private int comparator(double sample) {
-        if (sample > COMPARATOR_THRESHOLD) {
+        double magnitude = Math.abs(sample);
+        this.comparatorEnvelope += this.envelopeAlpha * (magnitude - this.comparatorEnvelope);
+
+        double baseThreshold = Math.max(COMPARATOR_FLOOR_THRESHOLD,
+                this.comparatorEnvelope * COMPARATOR_THRESHOLD_RATIO);
+        double highThreshold = baseThreshold * (1.0 + COMPARATOR_HYSTERESIS_RATIO);
+        double lowThreshold = baseThreshold * (1.0 - COMPARATOR_HYSTERESIS_RATIO);
+
+        if (sample > highThreshold) {
             this.lastComparatorBit = 1;
-        } else if (sample < -COMPARATOR_THRESHOLD) {
+        } else if (sample < -highThreshold) {
             this.lastComparatorBit = 0;
+        } else if (this.lastComparatorBit == 1 && sample < -lowThreshold) {
+            this.lastComparatorBit = 0;
+        } else if (this.lastComparatorBit == 0 && sample > lowThreshold) {
+            this.lastComparatorBit = 1;
         }
         return this.lastComparatorBit;
     }
@@ -203,27 +229,49 @@ public final class DcsDetector {
         }
 
         if (foundPolarity >= 0) {
-            if (this.bitsSinceMatch == CODEWORD_BITS
-                    && foundPolarity == this.matchedPolarity
-                    && foundCode == this.matchedCode) {
-                this.matchCount++;
+            if (this.targetCode != null && foundCode != this.targetCode.intValue()) {
+                foundPolarity = -1;
             } else {
-                this.matchCount = 1;
-                this.matchedCode = foundCode;
-                this.matchedPolarity = foundPolarity;
+                observeCandidate(foundCode, foundPolarity);
+                this.bitsSinceMatch = 0;
+                if (this.confidenceScore >= CONFIRM_SCORE_THRESHOLD) {
+                    this.lastConfirmedSample = this.sampleCursor;
+                    this.lastDetectedCode = this.candidateCode;
+                    this.lastPolarity = this.candidatePolarity;
+                }
             }
+        }
 
-            this.bitsSinceMatch = 0;
-            if (this.matchCount >= 3) {
-                this.lastConfirmedSample = this.sampleCursor;
-                this.lastDetectedCode = foundCode;
-                this.lastPolarity = foundPolarity;
-            }
-        } else if (this.bitsSinceMatch >= CODEWORD_BITS) {
-            this.matchCount = 0;
+        if (foundPolarity < 0 && this.bitsSinceMatch >= CODEWORD_BITS) {
+            decayCandidate();
             this.bitsSinceMatch = -1;
-            this.matchedCode = NO_CODE;
-            this.matchedPolarity = -1;
+        }
+    }
+
+    private void observeCandidate(int foundCode, int foundPolarity) {
+        if (this.candidateCode == foundCode && this.candidatePolarity == foundPolarity) {
+            this.confidenceScore = Math.min(MAX_CONFIDENCE_SCORE, this.confidenceScore + 1);
+            return;
+        }
+
+        if (this.confidenceScore > 1) {
+            this.confidenceScore--;
+            return;
+        }
+
+        this.candidateCode = foundCode;
+        this.candidatePolarity = foundPolarity;
+        this.confidenceScore = 1;
+    }
+
+    private void decayCandidate() {
+        if (this.confidenceScore > 0) {
+            this.confidenceScore--;
+        }
+        if (this.confidenceScore <= 0) {
+            this.confidenceScore = 0;
+            this.candidateCode = NO_CODE;
+            this.candidatePolarity = -1;
         }
     }
 
