@@ -3147,12 +3147,10 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 		color: #34495e;
 	}
 
-	.status-row {
-		margin-bottom: 8px;
+	.selected-recording-summary {
 		display: flex;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: 8px;
+		flex-direction: column;
+		gap: 4px;
 	}
 
 	.recordings-controls {
@@ -3284,9 +3282,15 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 	}
 
 	.status-text {
-		flex: 1 1 240px;
+		display: block;
+		margin-top: 2px;
 		font-size: 12px;
 		line-height: 1.3;
+		color: #d4d4d4;
+	}
+
+	body.theme-light .status-text {
+		color: #2d3742;
 	}
 
 	.refresh-button {
@@ -3463,6 +3467,10 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 		word-break: break-word;
 	}
 
+	#selectedMeta:empty {
+		display: none;
+	}
+
 	.recordings-page-wrap {
 		max-width: 1200px;
 		margin: 0 auto;
@@ -3570,18 +3578,15 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 </style>
 
 <h2><?=$PAGE_TITLE?></h2>
-<div class="status-row">
-	<?php if ($authenticate === true) { ?>
-		<a class="refresh-button" style="min-height: 20px; max-height: 20px;" href="?logout=1" style="text-decoration: none;">Logout<?=getRecordingsAuthenticatedUsername() !== '' ? ' (' . htmlspecialchars(getRecordingsAuthenticatedUsername(), ENT_QUOTES, 'UTF-8') . ')' : ''?></a>
-	<?php } ?>
-	<span id="statusText" class="status-text">Loading recordings...</span>
-</div>
 
 <div class="recordings-layout">
 	<div class="recordings-player-col">
 		<div class="recordings-panel" style="padding: 10px;">
-			<b id="selectedTitle">No recording selected</b><br />
-			<small id="selectedMeta">Select a recording to begin playback.</small>
+			<div class="selected-recording-summary">
+				<b id="selectedTitle">No recording selected</b>
+				<small id="selectedMeta">Select a recording to begin playback.</small>
+				<small id="statusText" class="status-text">Loading recordings...</small>
+			</div>
 			<div class="custom-audio-player is-empty" id="customAudioPlayer">
 				<div class="audio-controls-cluster">
 					<button type="button" id="audioSkipBackButton" class="audio-icon-button audio-skip-button" aria-label="Skip back 10 seconds" title="Back 10s" disabled>
@@ -4218,10 +4223,7 @@ function renderSelectedPlaybackSummary(recording, audioPlayer)
 	}
 
 	titleElement.textContent = recording.time_display + ' - ' + recording.name_pretty;
-	metaElement.textContent = recording.path + ' • ' + recording.duration_display + ' • ' + recording.size_human;
-	if (recording.content_type) {
-		metaElement.textContent += ' • ' + recording.content_type;
-	}
+	metaElement.textContent = '';
 }
 
 function playAudioElement(audioPlayer)

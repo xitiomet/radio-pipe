@@ -74,6 +74,46 @@ public final class ApiWebSocketServer extends WebSocketServer {
         broadcast(json.toString());
     }
 
+    public void publishEvent(String event, Object... keyValuePairs) {
+        if (event == null || event.trim().isEmpty()) {
+            return;
+        }
+
+        if (keyValuePairs == null) {
+            keyValuePairs = new Object[0];
+        }
+
+        if ((keyValuePairs.length % 2) != 0) {
+            throw new IllegalArgumentException("event key/value pairs must be even");
+        }
+
+        StringBuilder json = new StringBuilder();
+        json.append("{\"event\":\"").append(escapeJson(event)).append("\"");
+        for (int i = 0; i < keyValuePairs.length; i += 2) {
+            Object keyObj = keyValuePairs[i];
+            Object valueObj = keyValuePairs[i + 1];
+            if (keyObj == null) {
+                continue;
+            }
+            String key = keyObj.toString();
+            if (key.trim().isEmpty()) {
+                continue;
+            }
+            json.append(",\"").append(escapeJson(key)).append("\":");
+            if (valueObj == null) {
+                json.append("null");
+            } else if (valueObj instanceof Number) {
+                json.append(valueObj);
+            } else {
+                String value = valueObj.toString();
+                json.append("\"").append(escapeJson(value)).append("\"");
+            }
+        }
+        json.append("}");
+
+        broadcast(json.toString());
+    }
+
     public void shutdownQuietly() {
         try {
             stop(1000);

@@ -7,13 +7,14 @@ public final class DcsDetector {
     private static final int CODEWORD_BITS = 23;
     private static final int CODEWORD_MASK = 0x7FFFFF;
     private static final int GOLAY_POLY = 0xC75;
+    private static final int NO_CODE = -1;
     private static final long PLL_PHASE_MASK = 0xFFFFFFFFL;
     private static final long PLL_PHASE_MIDPOINT = 0x80000000L;
     private static final long PLL_PHASE_WRAP = 0x1_0000_0000L;
     private static final double FILTER_CUTOFF_HZ = 300.0;
     private static final double COMPARATOR_THRESHOLD = 500.0 / 32768.0;
 
-    private final int targetCode;
+    private final Integer targetCode;
     private final long pllIncrement;
     private final long holdSamples;
     private final double b0;
@@ -32,19 +33,31 @@ public final class DcsDetector {
     private long totalBits;
     private int matchCount;
     private int bitsSinceMatch;
+    private int matchedCode;
     private int matchedPolarity;
+    private int lastDetectedCode;
     private int lastPolarity;
     private long sampleCursor;
     private long lastConfirmedSample;
 
+    public DcsDetector(AudioFormat format) {
+        this(format, null);
+    }
+
     public DcsDetector(AudioFormat format, int targetCode) {
+        this(format, Integer.valueOf(targetCode));
+    }
+
+    private DcsDetector(AudioFormat format, Integer targetCode) {
         if (format.getSampleRate() <= 0) {
             throw new IllegalArgumentException("Invalid sample rate for DCS detector");
         }
 
-        this.targetCode = targetCode & 0x1FF;
+        this.targetCode = (targetCode == null) ? null : Integer.valueOf(targetCode.intValue() & 0x1FF);
         this.bitsSinceMatch = -1;
+        this.matchedCode = NO_CODE;
         this.matchedPolarity = -1;
+        this.lastDetectedCode = NO_CODE;
         this.lastPolarity = -1;
         this.lastConfirmedSample = Long.MIN_VALUE;
 
@@ -96,6 +109,17 @@ public final class DcsDetector {
         }
 
         return isGateOpen();
+    }
+
+    public Integer getDetectedCode() {
+        return isDetected() ? Integer.valueOf(this.lastDetectedCode) : null;
+    }
+
+    public boolean isDetected() {
+        if (this.lastConfirmedSample < 0 || this.lastDetectedCode < 0) {
+            return false;
+        }
+        return (this.sampleCursor - this.lastConfirmedSample) <= this.holdSamples;
     }
 
     public String getPolarityLabel() {
@@ -168,32 +192,37 @@ public final class DcsDetector {
         }
 
         int foundPolarity = -1;
-        int normalCode = extractCode(this.shiftRegister, false);
-        if (normalCode == this.targetCode) {
+        int foundCode = extractCode(this.shiftRegister, false);
+        if (foundCode >= 0) {
             foundPolarity = 0;
         } else {
-            int invertedCode = extractCode(this.shiftRegister, true);
-            if (invertedCode == this.targetCode) {
+            foundCode = extractCode(this.shiftRegister, true);
+            if (foundCode >= 0) {
                 foundPolarity = 1;
             }
         }
 
         if (foundPolarity >= 0) {
-            if (this.bitsSinceMatch == CODEWORD_BITS && foundPolarity == this.matchedPolarity) {
+            if (this.bitsSinceMatch == CODEWORD_BITS
+                    && foundPolarity == this.matchedPolarity
+                    && foundCode == this.matchedCode) {
                 this.matchCount++;
             } else {
                 this.matchCount = 1;
+                this.matchedCode = foundCode;
                 this.matchedPolarity = foundPolarity;
             }
 
             this.bitsSinceMatch = 0;
             if (this.matchCount >= 3) {
                 this.lastConfirmedSample = this.sampleCursor;
+                this.lastDetectedCode = foundCode;
                 this.lastPolarity = foundPolarity;
             }
         } else if (this.bitsSinceMatch >= CODEWORD_BITS) {
             this.matchCount = 0;
             this.bitsSinceMatch = -1;
+            this.matchedCode = NO_CODE;
             this.matchedPolarity = -1;
         }
     }
@@ -213,10 +242,11 @@ public final class DcsDetector {
     }
 
     private boolean isGateOpen() {
-        if (this.lastConfirmedSample < 0) {
+        Integer detectedCode = getDetectedCode();
+        if (detectedCode == null) {
             return false;
         }
-        return (this.sampleCursor - this.lastConfirmedSample) <= this.holdSamples;
+        return this.targetCode == null || detectedCode.intValue() == this.targetCode.intValue();
     }
 
     private static boolean isValidGolayCodeword(int codeword) {

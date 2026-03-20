@@ -117,6 +117,36 @@ Examples:
 - `{"event":"hook_result","result":"exit_code=0"}`
 - `{"event":"hook_result","result":"error: ..."}`
 
+### Status (every 250ms)
+
+```json
+{"event":"status","stream_name":"dev0","source":"stdin:44100,s16le,2","recordingsPath":"/home/user/recordings","pid":12345,"api_port":4040,"dcs_gate_enabled":"false","dcs":"073","dcs_polarity":"normal","dcs_gate":"open","ctcss_gate_enabled":"true","ctcss":"100.0","ctcss_gate":"open","rms_gate":"closed","rms_db":-15.3,"gate":"closed","gate_reason":"silence","gate_seconds":1.002,"audio_detected":"false","audio_detected_seconds":1.002}
+```
+
+Sent every 250 milliseconds while the recorder is running.
+
+Fields:
+- `event`: always `status`
+- `stream_name`: stream title (from ICY headers or `--name` override)
+- `source`: source URL or `stdin:RATE,ENCODING,CHANNELS` (e.g., `stdin:44100,s16le,2` or `http://icecast.example.com:8000/stream.mp3`)
+- `recordingsPath`: absolute path to the recordings directory, or `null` if not recording to disk
+- `pid`: process ID of the radio-pipe instance
+- `api_port`: WebSocket server port
+- `dcs_gate_enabled`: `true` when `--dcs` is configured
+- `dcs`: currently detected DCS code, or `null` if none is currently detected. This can be populated even when the DCS gate is disabled.
+- `dcs_polarity`: currently detected DCS polarity (`normal`, `inverted`, or `unknown`), or `null` if no DCS is currently detected
+- `dcs_gate`: `open` or `closed`
+- `ctcss_gate_enabled`: `true` when `--ctcss` is configured
+- `ctcss`: currently detected CTCSS tone, or `null` if none is currently detected. This can be populated even when the CTCSS gate is disabled.
+- `ctcss_gate`: `open` or `closed`
+- `rms_gate`: RMS/silence gate (`open` when audio is loud enough, `closed` when silent)
+- `rms_db`: current RMS level in decibels (dB)
+- `gate`: overall gate state (open only if all gates open)
+- `gate_reason`: blocker for overall gate (`dcs`, `ctcss`, `silence`, or `none` when open)
+- `gate_seconds`: seconds since the overall gate entered its current state
+- `audio_detected`: `true` when current audio frames pass all gate conditions
+- `audio_detected_seconds`: seconds since `audio_detected` last changed
+
 ## Example sequence
 
 Typical gated receive cycle (DCS gate configured):
@@ -134,6 +164,22 @@ Typical gated receive cycle (DCS gate configured):
 Notes:
 - `gate_closed` can occur multiple times in one receive cycle if the blocking reason changes.
 - `gate_open` includes the previous blocker in `reason`.
+
+## Ungated Detection Examples
+
+Live detection continues to populate status packets even when DCS or CTCSS gating is not enabled.
+
+Ungated DCS decode:
+
+```json
+{"event":"status","stream_name":"dev0","source":"stdin:44100,s16le,2","recordingsPath":"/home/user/recordings","pid":12345,"api_port":4040,"dcs_gate_enabled":"false","dcs":"073","dcs_polarity":"inverted","dcs_gate":"open","ctcss_gate_enabled":"false","ctcss":null,"ctcss_gate":"open","rms_gate":"open","rms_db":-14.8,"gate":"open","gate_reason":"none","gate_seconds":0.250,"audio_detected":"true","audio_detected_seconds":0.250}
+```
+
+Ungated CTCSS decode:
+
+```json
+{"event":"status","stream_name":"dev0","source":"http://icecast.example.com:8000/stream.mp3","recordingsPath":"/home/user/recordings","pid":12345,"api_port":4040,"dcs_gate_enabled":"false","dcs":null,"dcs_polarity":null,"dcs_gate":"open","ctcss_gate_enabled":"false","ctcss":"100.0","ctcss_gate":"open","rms_gate":"open","rms_db":-17.1,"gate":"open","gate_reason":"none","gate_seconds":0.500,"audio_detected":"true","audio_detected_seconds":0.500}
+```
 
 ## Notes
 

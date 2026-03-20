@@ -13,6 +13,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -430,17 +431,37 @@ public class StreamRecorder {
         int frameSize = format.getFrameSize();
         float frameRate = format.getFrameRate() > 0 ? format.getFrameRate() : format.getSampleRate();
         long framesForSilence = (long) (silenceDurationSeconds * frameRate);
-        DcsDetector dcsDetector = (this.requiredDcsCode == null) ? null : new DcsDetector(format, this.requiredDcsCode);
-        CtcssDetector ctcssDetector = (this.requiredCtcssToneHz == null) ? null : new CtcssDetector(format, this.requiredCtcssToneHz);
-        boolean dcsGateOpen = (dcsDetector == null);
-        boolean ctcssGateOpen = (ctcssDetector == null);
+        boolean dcsGateEnabled = (this.requiredDcsCode != null);
+        boolean ctcssGateEnabled = (this.requiredCtcssToneHz != null);
+        DcsDetector dcsStatusDetector = new DcsDetector(format);
+        CtcssDetector ctcssStatusDetector = new CtcssDetector(format);
+        DcsDetector dcsGateDetector = dcsGateEnabled ? new DcsDetector(format, this.requiredDcsCode) : null;
+        CtcssDetector ctcssGateDetector = ctcssGateEnabled ? new CtcssDetector(format, this.requiredCtcssToneHz) : null;
+        boolean dcsGateOpen = !dcsGateEnabled;
+        boolean ctcssGateOpen = !ctcssGateEnabled;
         long gateHoldNanos = (this.gateHoldSeconds <= 0.0)
             ? 0L
             : Math.max(1L, Math.round(this.gateHoldSeconds * 1_000_000_000.0));
         long dcsGateHoldUntilNanos = Long.MIN_VALUE;
         long ctcssGateHoldUntilNanos = Long.MIN_VALUE;
-        boolean gateStateInitialized = false;
-        String gateBlockReason = null;
+
+        long statusClockNanos = System.nanoTime();
+        boolean statusDcsGateOpen = dcsGateOpen;
+        long statusDcsGateSinceNanos = statusClockNanos;
+        boolean statusCtcssGateOpen = ctcssGateOpen;
+        long statusCtcssGateSinceNanos = statusClockNanos;
+        boolean statusRmsGateOpen = true;  // will be updated on first frame
+        long statusRmsGateSinceNanos = statusClockNanos;
+        double statusRmsDb = 0.0;  // current RMS level in dB
+        boolean statusGateOpen = false;
+        String statusGateReason = "silence";
+        long statusGateSinceNanos = statusClockNanos;
+        boolean statusAudioDetected = false;
+        long statusAudioDetectedSinceNanos = statusClockNanos;
+        String statusDetectedDcsLabel = null;
+        String statusDetectedDcsPolarity = null;
+        String statusDetectedCtcssLabel = null;
+        long nextStatusEmitNanos = statusClockNanos + TimeUnit.MILLISECONDS.toNanos(250L);
 
         int padFramesPerTick = Math.max(1, (int) Math.round((STDOUT_READ_POLL_MILLIS / 1000.0) * frameRate));
         int ioChunkBytes = Math.max(frameSize, padFramesPerTick * frameSize);
@@ -588,49 +609,85 @@ public class StreamRecorder {
                         silentFrames = 0;
                     }
                 }
+                long idleNowNanos = System.nanoTime();
+                nextStatusEmitNanos = publishStatusIfDue(
+                        idleNowNanos,
+                        nextStatusEmitNanos,
+                    dcsGateEnabled,
+                        statusDcsGateOpen,
+                        statusDcsGateSinceNanos,
+                    ctcssGateEnabled,
+                        statusCtcssGateOpen,
+                        statusCtcssGateSinceNanos,
+                        statusRmsGateOpen,
+                        statusRmsGateSinceNanos,
+                        statusRmsDb,
+                        statusGateOpen,
+                        statusGateReason,
+                        statusGateSinceNanos,
+                        statusAudioDetected,
+                        statusAudioDetectedSinceNanos,
+                        statusDetectedDcsLabel,
+                        statusDetectedDcsPolarity,
+                        statusDetectedCtcssLabel,
+                        this.streamUrl,
+                        this.stdinMode,
+                        format,
+                        this.baseDir);
                 continue;
             }
 
             boolean isSilent = isSilent(currentBuffer, n, format);
+            double currentRmsDb = calculateRmsDb(currentBuffer, n, format);
+            statusRmsDb = currentRmsDb;  // track current RMS level
             long nowNanos = System.nanoTime();
 
-            boolean dcsRawMatch = (dcsDetector == null) || dcsDetector.consume(currentBuffer, n, format);
-            if (dcsDetector != null && dcsRawMatch && gateHoldNanos > 0L) {
+            dcsStatusDetector.consume(currentBuffer, n, format);
+            Integer detectedDcsCode = dcsStatusDetector.getDetectedCode();
+            statusDetectedDcsLabel = (detectedDcsCode == null) ? null : formatDcsCode(detectedDcsCode.intValue());
+            statusDetectedDcsPolarity = (detectedDcsCode == null) ? null : dcsStatusDetector.getPolarityLabel();
+
+            boolean dcsRawMatch = !dcsGateEnabled || dcsGateDetector.consume(currentBuffer, n, format);
+            if (dcsGateEnabled && dcsRawMatch && gateHoldNanos > 0L) {
                 long holdUntil = nowNanos + gateHoldNanos;
                 dcsGateHoldUntilNanos = (holdUntil < 0L) ? Long.MAX_VALUE : holdUntil;
             }
             boolean dcsMatch = dcsRawMatch;
-            if (!dcsMatch && dcsDetector != null && gateHoldNanos > 0L && nowNanos <= dcsGateHoldUntilNanos) {
+            if (!dcsMatch && dcsGateEnabled && gateHoldNanos > 0L && nowNanos <= dcsGateHoldUntilNanos) {
                 dcsMatch = true;
             }
 
-            boolean ctcssRawMatch = (ctcssDetector == null) || ctcssDetector.consume(currentBuffer, n, format);
-            if (ctcssDetector != null && ctcssRawMatch && gateHoldNanos > 0L) {
+            ctcssStatusDetector.consume(currentBuffer, n, format);
+            Double detectedCtcssTone = ctcssStatusDetector.getDetectedToneHz();
+            statusDetectedCtcssLabel = (detectedCtcssTone == null) ? null : formatCtcssTone(detectedCtcssTone.doubleValue());
+
+            boolean ctcssRawMatch = !ctcssGateEnabled || ctcssGateDetector.consume(currentBuffer, n, format);
+            if (ctcssGateEnabled && ctcssRawMatch && gateHoldNanos > 0L) {
                 long holdUntil = nowNanos + gateHoldNanos;
                 ctcssGateHoldUntilNanos = (holdUntil < 0L) ? Long.MAX_VALUE : holdUntil;
             }
             boolean ctcssMatch = ctcssRawMatch;
-            if (!ctcssMatch && ctcssDetector != null && gateHoldNanos > 0L && nowNanos <= ctcssGateHoldUntilNanos) {
+            if (!ctcssMatch && ctcssGateEnabled && gateHoldNanos > 0L && nowNanos <= ctcssGateHoldUntilNanos) {
                 ctcssMatch = true;
             }
-            if (dcsDetector != null && dcsMatch != dcsGateOpen) {
+            if (dcsGateEnabled && dcsMatch != dcsGateOpen) {
                 dcsGateOpen = dcsMatch;
                 if (dcsGateOpen) {
                     log("DCS", ANSI_GREEN,
                             "DCS " + this.requiredDcsLabel + " detected ("
-                                    + dcsDetector.getPolarityLabel() + "), gate open.");
+                                    + dcsGateDetector.getPolarityLabel() + "), gate open.");
                     publishEvent("dcs_detected",
                             "dcs", this.requiredDcsLabel,
-                            "polarity", dcsDetector.getPolarityLabel());
+                            "polarity", dcsGateDetector.getPolarityLabel());
                 } else {
                     log("DCS", ANSI_YELLOW,
                             "DCS " + this.requiredDcsLabel + " no longer detected, gate closed.");
                     publishEvent("dcs_gone",
                             "dcs", this.requiredDcsLabel,
-                            "polarity", dcsDetector.getPolarityLabel());
+                            "polarity", dcsGateDetector.getPolarityLabel());
                 }
             }
-            if (ctcssDetector != null && ctcssMatch != ctcssGateOpen) {
+            if (ctcssGateEnabled && ctcssMatch != ctcssGateOpen) {
                 ctcssGateOpen = ctcssMatch;
                 if (ctcssGateOpen) {
                     log("CTCSS", ANSI_GREEN,
@@ -645,20 +702,62 @@ public class StreamRecorder {
                 }
             }
 
+            if (statusDcsGateOpen != dcsMatch) {
+                statusDcsGateOpen = dcsMatch;
+                statusDcsGateSinceNanos = nowNanos;
+            }
+            if (statusCtcssGateOpen != ctcssMatch) {
+                statusCtcssGateOpen = ctcssMatch;
+                statusCtcssGateSinceNanos = nowNanos;
+            }
+            boolean rmsGateOpen = !isSilent;
+            if (statusRmsGateOpen != rmsGateOpen) {
+                statusRmsGateOpen = rmsGateOpen;
+                statusRmsGateSinceNanos = nowNanos;
+            }
+
             String currentGateBlockReason = determineGateBlockReason(isSilent, dcsMatch, ctcssMatch);
-            if (!gateStateInitialized) {
-                gateStateInitialized = true;
-                gateBlockReason = currentGateBlockReason;
-            } else if (!sameNullableText(gateBlockReason, currentGateBlockReason)) {
-                if (currentGateBlockReason == null) {
-                    publishEvent("gate_open", "reason", gateBlockReason);
+            boolean currentGateOpen = (currentGateBlockReason == null);
+            if (statusGateOpen != currentGateOpen || !sameNullableText(statusGateReason, currentGateBlockReason)) {
+                if (currentGateOpen) {
+                    publishEvent("gate_open", "reason", (statusGateReason == null) ? "none" : statusGateReason);
                 } else {
                     publishEvent("gate_closed", "reason", currentGateBlockReason);
                 }
-                gateBlockReason = currentGateBlockReason;
+                statusGateOpen = currentGateOpen;
+                statusGateReason = currentGateBlockReason;
+                statusGateSinceNanos = nowNanos;
             }
 
             boolean gateAllowsAudio = !isSilent && dcsMatch && ctcssMatch;
+            if (statusAudioDetected != gateAllowsAudio) {
+                statusAudioDetected = gateAllowsAudio;
+                statusAudioDetectedSinceNanos = nowNanos;
+            }
+            nextStatusEmitNanos = publishStatusIfDue(
+                    nowNanos,
+                    nextStatusEmitNanos,
+                    dcsGateEnabled,
+                    statusDcsGateOpen,
+                    statusDcsGateSinceNanos,
+                    ctcssGateEnabled,
+                    statusCtcssGateOpen,
+                    statusCtcssGateSinceNanos,
+                    statusRmsGateOpen,
+                    statusRmsGateSinceNanos,
+                    statusRmsDb,
+                    statusGateOpen,
+                    statusGateReason,
+                    statusGateSinceNanos,
+                    statusAudioDetected,
+                    statusAudioDetectedSinceNanos,
+                    statusDetectedDcsLabel,
+                    statusDetectedDcsPolarity,
+                    statusDetectedCtcssLabel,
+                    this.streamUrl,
+                    this.stdinMode,
+                    format,
+                    this.baseDir);
             boolean includeFrameInClip = gateAllowsAudio || activelyRecording;
             if (this.stdoutEnabled && this.stdoutRawMode) {
                 if (this.stdoutPadMode) {
@@ -900,12 +999,16 @@ public class StreamRecorder {
     }
 
     private boolean isSilent(byte[] data, int len, AudioFormat format) {
+        return calculateRmsDb(data, len, format) < silenceThresholdDb;
+    }
+
+    private double calculateRmsDb(byte[] data, int len, AudioFormat format) {
         int sampleSize = format.getSampleSizeInBits();
         boolean bigEndian = format.isBigEndian();
         int channels = format.getChannels();
         if (sampleSize != 16) {
             // we only converted to 16‑bit; other cases should not happen
-            return false;
+            return -100.0;  // return very low dB value for unsupported format
         }
         int frames = len / format.getFrameSize();
         double sumSq = 0.0;
@@ -927,7 +1030,7 @@ public class StreamRecorder {
         }
         double rms = Math.sqrt(sumSq / (frames * channels));
         double db = 20 * Math.log10(rms + 1e-10); // avoid log(0)
-        return db < silenceThresholdDb;
+        return db;
     }
 
     private void writeChunk(byte[] audioData, AudioFormat format, long startTimeMs) {
@@ -1243,6 +1346,70 @@ public class StreamRecorder {
         return first.equals(second);
     }
 
+    private long publishStatusIfDue(long nowNanos,
+                                    long nextStatusEmitNanos,
+                                    boolean dcsGateEnabled,
+                                    boolean dcsGateOpen,
+                                    long dcsGateSinceNanos,
+                                    boolean ctcssGateEnabled,
+                                    boolean ctcssGateOpen,
+                                    long ctcssGateSinceNanos,
+                                    boolean rmsGateOpen,
+                                    long rmsGateSinceNanos,
+                                    double rmsDb,
+                                    boolean gateOpen,
+                                    String gateReason,
+                                    long gateSinceNanos,
+                                    boolean audioDetected,
+                                    long audioDetectedSinceNanos,
+                                    String currentDcsLabel,
+                                    String currentDcsPolarity,
+                                    String currentCtcssLabel,
+                                    URL streamUrl,
+                                    boolean stdinMode,
+                                    AudioFormat format,
+                                    Path baseDir) {
+        if (nowNanos < nextStatusEmitNanos) {
+            return nextStatusEmitNanos;
+        }
+
+        String gateReasonValue = gateOpen ? "none" : (gateReason == null ? "unknown" : gateReason);
+        String streamName = (this.streamTitle != null) ? this.streamTitle : "unknown";
+        String sourceValue = buildSourceString(stdinMode, format, streamUrl);
+        long pidValue = ProcessHandle.current().pid();
+        ApiWebSocketServer wsServer = this.apiWebSocketServer;
+        int apiPortValue = (wsServer != null) ? wsServer.getAddress().getPort() : 0;
+        String recordingsPathValue = (baseDir != null) ? baseDir.toAbsolutePath().toString() : null;
+        double gateSecondsValue = Double.parseDouble(formatDurationSeconds(gateSinceNanos, nowNanos));
+        double audioDetectedSecondsValue = Double.parseDouble(formatDurationSeconds(audioDetectedSinceNanos, nowNanos));
+        publishEvent("status",
+                "stream_name", streamName,
+                "source", sourceValue,
+                "recordingsPath", recordingsPathValue,
+                "pid", pidValue,
+                "api_port", apiPortValue,
+                "dcs_gate_enabled", String.valueOf(dcsGateEnabled),
+                "dcs", currentDcsLabel,
+                "dcs_polarity", currentDcsPolarity,
+                "dcs_gate", dcsGateOpen ? "open" : "closed",
+                "ctcss_gate_enabled", String.valueOf(ctcssGateEnabled),
+                "ctcss", currentCtcssLabel,
+                "ctcss_gate", ctcssGateOpen ? "open" : "closed",
+                "rms_gate", rmsGateOpen ? "open" : "closed",
+                "rms_db", Math.round(rmsDb * 10.0) / 10.0,
+                "gate", gateOpen ? "open" : "closed",
+                "gate_reason", gateReasonValue,
+                "gate_seconds", gateSecondsValue,
+                "audio_detected", String.valueOf(audioDetected),
+                "audio_detected_seconds", audioDetectedSecondsValue);
+        return nowNanos + TimeUnit.MILLISECONDS.toNanos(250L);
+    }
+
+    private static String formatDurationSeconds(long sinceNanos, long nowNanos) {
+        double seconds = Math.max(0L, nowNanos - sinceNanos) / 1_000_000_000.0;
+        return String.format(Locale.US, "%.3f", seconds);
+    }
+
     private void publishEvent(String event) {
         ApiWebSocketServer currentApiWebSocketServer = this.apiWebSocketServer;
         if (currentApiWebSocketServer == null) {
@@ -1252,6 +1419,14 @@ public class StreamRecorder {
     }
 
     private void publishEvent(String event, String... keyValuePairs) {
+        ApiWebSocketServer currentApiWebSocketServer = this.apiWebSocketServer;
+        if (currentApiWebSocketServer == null) {
+            return;
+        }
+        currentApiWebSocketServer.publishEvent(event, keyValuePairs);
+    }
+
+    private void publishEvent(String event, Object... keyValuePairs) {
         ApiWebSocketServer currentApiWebSocketServer = this.apiWebSocketServer;
         if (currentApiWebSocketServer == null) {
             return;
@@ -1340,5 +1515,28 @@ public class StreamRecorder {
 
     private static boolean supportsAnsi() {
         return System.console() != null;
+    }
+
+    private static String formatAudioEncoding(AudioFormat format) {
+        if (format == null) {
+            return "unknown";
+        }
+        String signedness = format.getEncoding() == AudioFormat.Encoding.PCM_UNSIGNED ? "u" : "s";
+        int bitDepth = format.getSampleSizeInBits();
+        String endianness = format.isBigEndian() ? "be" : "le";
+        return signedness + bitDepth + endianness;
+    }
+
+    private static String buildSourceString(boolean stdinMode, AudioFormat format, URL streamUrl) {
+        if (stdinMode) {
+            if (format == null) {
+                return "stdin";
+            }
+            int sampleRate = (int) format.getSampleRate();
+            int channels = format.getChannels();
+            String encoding = formatAudioEncoding(format);
+            return "stdin:" + sampleRate + "," + encoding + "," + channels;
+        }
+        return (streamUrl != null) ? streamUrl.toString() : "unknown";
     }
 }
