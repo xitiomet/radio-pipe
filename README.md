@@ -114,10 +114,7 @@ $ sudo ./scripts/install_rtl_sdr_watchdog.sh --endpoint http://127.0.0.1/rtl_sdr
 The watchdog posts `action=list&source=watchdog` on an interval to process queued retunes and periodic state cleanup.
 
 
-## Usage
-Basic usage example:
-![](https://openstatic.org/projects/radio-pipe/rms_screenshot.png)
-
+## Usages
 You can run the recorder against either a Shoutcast/Icecast stream URL or audio from stdin.
 Recordings are broken into WAV files whenever the stream goes silent and are placed in day‑based folders.
 
