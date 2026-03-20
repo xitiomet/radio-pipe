@@ -452,6 +452,7 @@ public class StreamRecorder {
         long statusAudioDetectedSinceNanos = statusClockNanos;
         String statusDetectedDcsLabel = null;
         String statusDetectedDcsPolarity = null;
+        int statusDcsConfidence = 0;
         String statusDetectedCtcssLabel = null;
         long nextStatusEmitNanos = statusClockNanos + TimeUnit.MILLISECONDS.toNanos(250L);
 
@@ -623,6 +624,7 @@ public class StreamRecorder {
                         statusAudioDetectedSinceNanos,
                         statusDetectedDcsLabel,
                         statusDetectedDcsPolarity,
+                        statusDcsConfidence,
                         statusDetectedCtcssLabel,
                         this.streamUrl,
                         this.stdinMode,
@@ -640,6 +642,7 @@ public class StreamRecorder {
             Integer detectedDcsCode = dcsStatusDetector.getDetectedCode();
             statusDetectedDcsLabel = (detectedDcsCode == null) ? null : formatDcsCode(detectedDcsCode.intValue());
             statusDetectedDcsPolarity = (detectedDcsCode == null) ? null : dcsStatusDetector.getPolarityLabel();
+            statusDcsConfidence = dcsStatusDetector.getConfidenceScore();
 
             boolean dcsRawMatch = !dcsGateEnabled || dcsGateDetector.consume(currentBuffer, n, processingFormat);
             if (dcsGateEnabled && dcsRawMatch && gateHoldNanos > 0L) {
@@ -754,6 +757,7 @@ public class StreamRecorder {
                     statusAudioDetectedSinceNanos,
                     statusDetectedDcsLabel,
                     statusDetectedDcsPolarity,
+                    statusDcsConfidence,
                     statusDetectedCtcssLabel,
                     this.streamUrl,
                     this.stdinMode,
@@ -1404,6 +1408,7 @@ public class StreamRecorder {
                                     long audioDetectedSinceNanos,
                                     String currentDcsLabel,
                                     String currentDcsPolarity,
+                                    int dcsStatusConfidence,
                                     String currentCtcssLabel,
                                     URL streamUrl,
                                     boolean stdinMode,
@@ -1446,6 +1451,7 @@ public class StreamRecorder {
                 "dcs", currentDcsLabel,
                 "dcsPolarity", currentDcsPolarity,
                 "dcsGate", dcsGateOpen ? "open" : "closed",
+                "dcsConfidence", dcsStatusConfidence,
                 "ctcssGateEnabled", ctcssGateEnabled,
                 "ctcss", currentCtcssLabel,
                 "ctcssGate", ctcssGateOpen ? "open" : "closed",

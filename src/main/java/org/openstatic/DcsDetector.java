@@ -9,8 +9,10 @@ public final class DcsDetector {
     private static final int GOLAY_POLY = 0xC75;
     private static final int NO_CODE = -1;
     private static final int CONFIRM_SCORE_THRESHOLD = 4;
+    private static final int CONFIRM_SCORE_THRESHOLD_OPEN = 6;
     private static final int MAX_CONFIDENCE_SCORE = 8;
     private static final long PLL_PHASE_MASK = 0xFFFFFFFFL;
+    private static final boolean[] VALID_DCS_CODEBOOK = buildCodebook();
     private static final long PLL_PHASE_MIDPOINT = 0x80000000L;
     private static final long PLL_PHASE_WRAP = 0x1_0000_0000L;
     private static final double FILTER_CUTOFF_HZ = 180.0;
@@ -22,6 +24,7 @@ public final class DcsDetector {
     private final Integer targetCode;
     private final long pllIncrement;
     private final long holdSamples;
+    private final int confirmScoreThreshold;
     private final double envelopeAlpha;
     private final double b0;
     private final double b1;
@@ -83,7 +86,12 @@ public final class DcsDetector {
 
         this.pllIncrement = Math.max(1L,
                 Math.round((BITRATE / sampleRate) * PLL_PHASE_WRAP));
-        this.holdSamples = Math.max(1L, Math.round(sampleRate));
+        this.holdSamples = (this.targetCode == null)
+                ? Math.max(1L, Math.round(sampleRate * 0.5))
+                : Math.max(1L, Math.round(sampleRate));
+        this.confirmScoreThreshold = (this.targetCode == null)
+                ? CONFIRM_SCORE_THRESHOLD_OPEN
+                : CONFIRM_SCORE_THRESHOLD;
         this.envelopeAlpha = Math.max(0.0005, Math.min(0.05, 1.0 / (sampleRate * 0.05)));
     }
 
@@ -132,6 +140,14 @@ public final class DcsDetector {
         return (this.sampleCursor - this.lastConfirmedSample) <= this.holdSamples;
     }
 
+    public int getConfidenceScore() {
+        return this.confidenceScore;
+    }
+
+    public Integer getCandidateCode() {
+        return (this.candidateCode == NO_CODE) ? null : Integer.valueOf(this.candidateCode);
+    }
+
     public String getPolarityLabel() {
         if (this.lastPolarity == 0) {
             return "normal";
@@ -164,7 +180,7 @@ public final class DcsDetector {
             long phaseError = (this.pllPhase < PLL_PHASE_MIDPOINT)
                     ? this.pllPhase
                     : (this.pllPhase - PLL_PHASE_WRAP);
-            this.pllPhase = (this.pllPhase - (phaseError >> 4)) & PLL_PHASE_MASK;
+            this.pllPhase = (this.pllPhase - (phaseError >> 5)) & PLL_PHASE_MASK;
         }
         this.previousInputBit = bit;
 
@@ -234,7 +250,7 @@ public final class DcsDetector {
             } else {
                 observeCandidate(foundCode, foundPolarity);
                 this.bitsSinceMatch = 0;
-                if (this.confidenceScore >= CONFIRM_SCORE_THRESHOLD) {
+                if (this.confidenceScore >= this.confirmScoreThreshold) {
                     this.lastConfirmedSample = this.sampleCursor;
                     this.lastDetectedCode = this.candidateCode;
                     this.lastPolarity = this.candidatePolarity;
@@ -286,7 +302,11 @@ public final class DcsDetector {
             return -1;
         }
 
-        return data12 & 0x1FF;
+        int code = data12 & 0x1FF;
+        if (!VALID_DCS_CODEBOOK[code]) {
+            return -1;
+        }
+        return code;
     }
 
     private boolean isGateOpen() {
@@ -295,6 +315,26 @@ public final class DcsDetector {
             return false;
         }
         return this.targetCode == null || detectedCode.intValue() == this.targetCode.intValue();
+    }
+
+    private static boolean[] buildCodebook() {
+        int[] codes = {
+            023, 025, 026, 031, 032, 036, 043, 047, 051, 053, 054, 065, 071, 072, 073, 074,
+            0114, 0115, 0116, 0121, 0122, 0123, 0124, 0125, 0131, 0132, 0134, 0141, 0143, 0145, 0152, 0155,
+            0156, 0162, 0165, 0172, 0174,
+            0205, 0212, 0214, 0223, 0225, 0226, 0231, 0243, 0244, 0245, 0246, 0251, 0252, 0255, 0261, 0263,
+            0265, 0266, 0271, 0274,
+            0306, 0311, 0315, 0325, 0331, 0332, 0343, 0346, 0351, 0356, 0364, 0365, 0371,
+            0411, 0412, 0413, 0423, 0431, 0432, 0445, 0446, 0452, 0454, 0455, 0462, 0464, 0465, 0466,
+            0503, 0506, 0516, 0523, 0525, 0526, 0532, 0546, 0565,
+            0606, 0612, 0624, 0627, 0631, 0632, 0645, 0652, 0654, 0662, 0664,
+            0703, 0712, 0723, 0731, 0732, 0734, 0743, 0754
+        };
+        boolean[] table = new boolean[512];
+        for (int code : codes) {
+            table[code] = true;
+        }
+        return table;
     }
 
     private static boolean isValidGolayCodeword(int codeword) {
