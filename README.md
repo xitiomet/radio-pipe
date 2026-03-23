@@ -161,6 +161,20 @@ $ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
   | your-program-that-reads-raw-pcm
 ```
 
+raw PCM stdout example with post-gate gain:
+```bash
+$ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
+  | ./radio-pipe --stdin --stdin-raw \
+    --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
+    --dcs 023 \
+    --gain 6 --auto-gain \
+    --stdout --stdout-raw --stdout-pad \
+    --stdout-rate 8000 --stdout-channels 1 --stdout-bits 16 \
+  | your-program-that-reads-raw-pcm
+```
+
+Note: Combining higher fixed `--gain` values with `--auto-gain` can increase clipping on loud signals; reduce `--gain` if output sounds distorted.
+
 websocket API example (publish gate/hook events to clients):
 ```bash
 $ ./radio-pipe \
