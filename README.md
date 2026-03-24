@@ -10,6 +10,7 @@ Built for unattended logging, RadioPipe stores WAV clips in date-based folders a
 * Accepts stream URLs (`--url`) or piped audio (`--stdin`, including raw PCM)
 * Supports optional DCS/CTCSS gating for tone/code-controlled recording
 * Can emit gated audio to stdout as WAV clips or raw PCM (`--stdout` / `--stdout-raw`)
+* Can play gated audio directly to a selected hardware output device (`--dev`, `--devs`)
 * Can publish real-time recorder events over WebSocket (`--api-websocket host:port`)
 * Writes date-organized clips with stream metadata and timestamped filenames
 * Supports post-write automation hooks (`--on-write`) for conversion/upload workflows
@@ -173,6 +174,18 @@ $ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
   | your-program-that-reads-raw-pcm
 ```
 
+list hardware output devices and play to one:
+```bash
+$ ./radio-pipe --devs
+
+$ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
+  | ./radio-pipe --stdin --stdin-raw \
+    --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
+    --dcs 023 --dev 0 -o ./recordings
+```
+
+`--dev` accepts either a device index from `--devs` (example: `--dev 0`) or a case-insensitive name/description substring (example: `--dev USB`).
+
 Note: Combining higher fixed `--gain` values with `--auto-gain` can increase clipping on loud signals; reduce `--gain` if output sounds distorted.
 
 websocket API example (publish gate/hook events to clients):
@@ -209,6 +222,7 @@ RadioPipe uses one internal processing path regardless of whether audio comes fr
   * `--stdout` writes the finished clip to stdout as WAV
   * `--on-write` runs after a file clip is written
 9. In `--stdout --stdout-raw` mode, gated audio is emitted immediately as PCM instead of waiting for clip close. With `--stdout-pad`, the raw stdout path stays continuous by outputting silence during stalls or closed-gate periods.
+10. In `--dev` mode, gated audio is also emitted immediately to the selected hardware playback device (using Java Sound output mixers).
 
 ### Gate stages in evaluation order
 

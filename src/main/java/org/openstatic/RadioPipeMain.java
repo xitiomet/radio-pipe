@@ -2,6 +2,10 @@ package org.openstatic;
 
 import org.apache.commons.cli.*;
 import javax.sound.sampled.AudioFormat;
+import javax.sound.sampled.AudioSystem;
+import javax.sound.sampled.DataLine;
+import javax.sound.sampled.Mixer;
+import javax.sound.sampled.SourceDataLine;
 
 import java.net.InetSocketAddress;
 import java.net.URL;
@@ -42,6 +46,10 @@ public class RadioPipeMain
             .desc("Input de-jitter buffer in milliseconds to smooth bursty piped input (default 250)").build());
         options.addOption(Option.builder().longOpt("stdout")
             .desc("Write gated clips to stdout (WAV clip stream by default)").build());
+        options.addOption(Option.builder().longOpt("dev").hasArg().argName("DEVICE")
+            .desc("Play gated audio to a hardware output device (index from --devs or mixer name)").build());
+        options.addOption(Option.builder().longOpt("devs")
+            .desc("List available hardware output devices and exit").build());
         options.addOption(Option.builder().longOpt("stdout-raw")
             .desc("Write gated audio to stdout as raw PCM bytes").build());
         options.addOption(Option.builder().longOpt("stdout-pad")
@@ -95,6 +103,11 @@ public class RadioPipeMain
                 showHelp(options);
             }
 
+            if (cmd.hasOption("devs")) {
+                listAudioOutputDevices();
+                return;
+            }
+
             // gather options
             boolean hasUrl = cmd.hasOption("u");
             boolean useStdin = cmd.hasOption("i");
@@ -105,6 +118,7 @@ public class RadioPipeMain
                     || cmd.hasOption("stdin-big-endian")
                     || cmd.hasOption("stdin-unsigned");
             boolean useStdout = cmd.hasOption("stdout");
+            String outputDeviceSelector = cmd.getOptionValue("dev");
             boolean stdoutRaw = cmd.hasOption("stdout-raw");
                 boolean stdoutPad = cmd.hasOption("stdout-pad");
                 long stdoutPadDelayMs = Long.parseLong(cmd.getOptionValue("stdout-pad-delay", "500"));
@@ -131,6 +145,9 @@ public class RadioPipeMain
                 useStdout = true;
                 stdoutRaw = true;
                 stdoutPad = true;
+            }
+            if (outputDeviceSelector != null && outputDeviceSelector.trim().isEmpty()) {
+                throw new ParseException("dev must not be empty; use --devs to list devices");
             }
             if (hasUrl == useStdin) {
                 throw new ParseException("Specify exactly one input source: --url <URL> or --stdin");
@@ -333,6 +350,7 @@ public class RadioPipeMain
             recorder.setGateHoldSeconds(gateHoldSeconds);
             recorder.setGainControl(gainDb, autoGain);
             recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad, stdoutPadDelayMs);
+            recorder.setDeviceOutput(outputDeviceSelector);
             recorder.setApiWebSocketServer(apiWebSocketServer);
             final ApiWebSocketServer shutdownApiWebSocketServer = apiWebSocketServer;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -354,6 +372,40 @@ public class RadioPipeMain
                 apiWebSocketServer.shutdownQuietly();
             }
         }
+    }
+
+    private static void listAudioOutputDevices()
+    {
+        Mixer.Info[] mixerInfos = AudioSystem.getMixerInfo();
+        int listed = 0;
+        for (int i = 0; i < mixerInfos.length; i++) {
+            Mixer.Info info = mixerInfos[i];
+            Mixer mixer = AudioSystem.getMixer(info);
+            DataLine.Info speakerLine = new DataLine.Info(SourceDataLine.class, null);
+            if (!mixer.isLineSupported(speakerLine)) {
+                continue;
+            }
+
+            listed++;
+            System.out.println(i + ": " + info.getName());
+            if (!isBlank(info.getDescription())) {
+                System.out.println("    description: " + info.getDescription());
+            }
+            if (!isBlank(info.getVendor())) {
+                System.out.println("    vendor: " + info.getVendor());
+            }
+            if (!isBlank(info.getVersion())) {
+                System.out.println("    version: " + info.getVersion());
+            }
+        }
+
+        if (listed == 0) {
+            System.out.println("No hardware audio output devices were detected by Java Sound.");
+            return;
+        }
+
+        System.out.println();
+        System.out.println("Use --dev <index> or --dev <name-substring> to select a device.");
     }
 
     private static InetSocketAddress parseApiWebSocketAddress(String bindingValue) throws ParseException

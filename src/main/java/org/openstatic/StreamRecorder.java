@@ -78,6 +78,10 @@ public class StreamRecorder {
     private volatile long stdoutPadDelayMillis;
     private volatile boolean stdoutRawConversionWarned;
     private volatile boolean stdoutConfigLogged;
+    private volatile boolean deviceOutputEnabled;
+    private volatile String deviceOutputSelector;
+    private volatile boolean deviceOutputConversionWarned;
+    private volatile boolean deviceConfigLogged;
     private volatile double outputGainDb;
     private volatile boolean autoGainEnabled;
     private volatile ApiWebSocketServer apiWebSocketServer;
@@ -210,6 +214,10 @@ public class StreamRecorder {
         this.stdoutPadDelayMillis = DEFAULT_STDOUT_PAD_DELAY_MILLIS;
         this.stdoutRawConversionWarned = false;
         this.stdoutConfigLogged = false;
+        this.deviceOutputEnabled = false;
+        this.deviceOutputSelector = null;
+        this.deviceOutputConversionWarned = false;
+        this.deviceConfigLogged = false;
         this.outputGainDb = 0.0;
         this.autoGainEnabled = false;
         this.apiWebSocketServer = null;
@@ -291,6 +299,21 @@ public class StreamRecorder {
 
     public void setApiWebSocketServer(ApiWebSocketServer apiWebSocketServer) {
         this.apiWebSocketServer = apiWebSocketServer;
+    }
+
+    public void setDeviceOutput(String deviceSelector) {
+        if (isBlank(deviceSelector)) {
+            this.deviceOutputEnabled = false;
+            this.deviceOutputSelector = null;
+            this.deviceOutputConversionWarned = false;
+            this.deviceConfigLogged = false;
+            return;
+        }
+
+        this.deviceOutputEnabled = true;
+        this.deviceOutputSelector = deviceSelector.trim();
+        this.deviceOutputConversionWarned = false;
+        this.deviceConfigLogged = false;
     }
 
     public void setGainControl(double gainDb, boolean autoGainEnabled) {
@@ -432,6 +455,7 @@ public class StreamRecorder {
             logDcsConfiguration();
             logCtcssConfiguration();
             logStdoutConfiguration(activeOutputFormat);
+            logDeviceConfiguration(activeOutputFormat);
             logGainConfiguration();
             processStream(din, decodedFormat, activeOutputFormat);
         }
@@ -507,6 +531,11 @@ public class StreamRecorder {
             }
         }
 
+        DeviceOutputSession deviceOutputSession = null;
+        if (this.deviceOutputEnabled) {
+            deviceOutputSession = openDeviceOutputSession(processingFormat, clipOutputFormat);
+        }
+
         BlockingQueue<StreamReadResult> readQueue = new LinkedBlockingQueue<>();
         Thread readerThread = new Thread(() -> {
             try {
@@ -527,7 +556,8 @@ public class StreamRecorder {
         readerThread.setDaemon(true);
         readerThread.start();
 
-        while (running) {
+        try {
+            while (running) {
             StreamReadResult readResult;
             try {
                 if (inputEndOfStream) {
@@ -594,6 +624,9 @@ public class StreamRecorder {
                     if (activelyRecording) {
                         chunk.write(padSilence, 0, padBytes);
                         recordedFrames += padFramesPerTick;
+                        if (deviceOutputSession != null) {
+                            writeDeviceOutput(deviceOutputSession, padSilence, padBytes, processingFormat);
+                        }
                     }
 
                     silentFrames += padFramesPerTick;
@@ -819,6 +852,9 @@ public class StreamRecorder {
                     writeStdoutRaw(currentBuffer, n, processingFormat);
                 }
             }
+            if (deviceOutputSession != null && includeFrameInClip) {
+                writeDeviceOutput(deviceOutputSession, currentBuffer, n, processingFormat);
+            }
 
             if (gateAllowsAudio) {
                 if (chunk.size() == 0) {
@@ -865,7 +901,7 @@ public class StreamRecorder {
                 }
             }
         }
-        if (chunk.size() > 0) {
+            if (chunk.size() > 0) {
             byte[] clipAudio = chunk.toByteArray();
             double soundSeconds = soundFrames / frameRate;
             if (soundSeconds > 1.0) {
@@ -881,6 +917,9 @@ public class StreamRecorder {
                                 soundSeconds));
             }
             chunk.reset();
+        }
+        } finally {
+            closeDeviceOutputSession(deviceOutputSession);
         }
     }
 
@@ -935,6 +974,21 @@ public class StreamRecorder {
         }
 
         this.stdoutConfigLogged = true;
+    }
+
+    private void logDeviceConfiguration(AudioFormat activeFormat) {
+        if (!this.deviceOutputEnabled || this.deviceConfigLogged) {
+            return;
+        }
+
+        String selector = this.deviceOutputSelector;
+        if (selector == null) {
+            selector = "default";
+        }
+        log("DEV", ANSI_CYAN,
+                "hardware audio output enabled: selector='" + selector
+                        + "', preferred format " + describeAudioFormat(activeFormat));
+        this.deviceConfigLogged = true;
     }
 
     private void logGainConfiguration() {
@@ -1075,6 +1129,193 @@ public class StreamRecorder {
                 System.out.flush();
             }
         }
+    }
+
+    private DeviceOutputSession openDeviceOutputSession(AudioFormat sourceFormat, AudioFormat preferredFormat) throws IOException {
+        String selector = this.deviceOutputSelector;
+        Mixer.Info mixerInfo = resolveOutputMixerInfo(selector);
+        Mixer mixer = AudioSystem.getMixer(mixerInfo);
+
+        AudioFormat lineFormat = preferredFormat;
+        if (!isMixerSourceLineSupported(mixer, lineFormat) && isMixerSourceLineSupported(mixer, sourceFormat)) {
+            lineFormat = sourceFormat;
+            log("DEV", ANSI_YELLOW,
+                    "device does not support preferred format; using "
+                            + describeAudioFormat(sourceFormat));
+        }
+
+        DataLine.Info lineInfo = new DataLine.Info(SourceDataLine.class, lineFormat);
+        if (!mixer.isLineSupported(lineInfo)) {
+            throw new IOException("Selected output device does not support playback format: "
+                    + describeAudioFormat(lineFormat));
+        }
+
+        try {
+            SourceDataLine line = (SourceDataLine) mixer.getLine(lineInfo);
+            line.open(lineFormat);
+            line.start();
+            log("DEV", ANSI_CYAN,
+                    "playing on " + describeMixer(mixerInfo)
+                            + " at " + describeAudioFormat(lineFormat));
+            return new DeviceOutputSession(line, lineFormat, mixerInfo);
+        } catch (LineUnavailableException lue) {
+            throw new IOException("Unable to open selected output device: " + lue.getMessage(), lue);
+        }
+    }
+
+    private void closeDeviceOutputSession(DeviceOutputSession session) {
+        if (session == null || session.line == null) {
+            return;
+        }
+
+        try {
+            session.line.drain();
+        } catch (Exception ignored) {
+            // Best effort during shutdown.
+        }
+        try {
+            session.line.stop();
+        } catch (Exception ignored) {
+            // Best effort during shutdown.
+        }
+        try {
+            session.line.close();
+        } catch (Exception ignored) {
+            // Best effort during shutdown.
+        }
+    }
+
+    private void writeDeviceOutput(DeviceOutputSession session, byte[] audioData, int len, AudioFormat sourceFormat) {
+        if (session == null || len <= 0) {
+            return;
+        }
+
+        AudioFormat targetFormat = session.format;
+        try {
+            if (audioFormatsEquivalent(sourceFormat, targetFormat)) {
+                session.line.write(audioData, 0, len);
+                return;
+            }
+
+            if (!AudioSystem.isConversionSupported(targetFormat, sourceFormat)) {
+                if (!this.deviceOutputConversionWarned) {
+                    this.deviceOutputConversionWarned = true;
+                    log("DEV", ANSI_YELLOW,
+                            "device conversion unsupported from "
+                                    + describeAudioFormat(sourceFormat)
+                                    + " to "
+                                    + describeAudioFormat(targetFormat)
+                                    + "; dropping device audio.");
+                }
+                return;
+            }
+
+            try (ByteArrayInputStream bais = new ByteArrayInputStream(audioData, 0, len);
+                 AudioInputStream source = new AudioInputStream(bais, sourceFormat, len / sourceFormat.getFrameSize());
+                 AudioInputStream converted = AudioSystem.getAudioInputStream(targetFormat, source)) {
+                byte[] convertedBuffer = new byte[Math.max(1024, targetFormat.getFrameSize() * 256)];
+                int read;
+                while ((read = converted.read(convertedBuffer)) != -1) {
+                    session.line.write(convertedBuffer, 0, read);
+                }
+            }
+        } catch (Exception deviceWriteException) {
+            if (!this.deviceOutputConversionWarned) {
+                this.deviceOutputConversionWarned = true;
+                log("DEV", ANSI_YELLOW,
+                        "device playback failed (" + deviceWriteException.getMessage()
+                                + "); disabling further conversion warnings.");
+            }
+        }
+    }
+
+    private static boolean isMixerSourceLineSupported(Mixer mixer, AudioFormat format) {
+        if (mixer == null || format == null) {
+            return false;
+        }
+        DataLine.Info lineInfo = new DataLine.Info(SourceDataLine.class, format);
+        return mixer.isLineSupported(lineInfo);
+    }
+
+    private static Mixer.Info resolveOutputMixerInfo(String selector) throws IOException {
+        if (isBlank(selector)) {
+            throw new IOException("Audio device selector is missing; use --devs to list devices");
+        }
+
+        Mixer.Info[] mixers = AudioSystem.getMixerInfo();
+        Integer index = parseInteger(selector);
+        if (index != null) {
+            if (index < 0 || index >= mixers.length) {
+                throw new IOException("Audio device index out of range: " + selector);
+            }
+            Mixer mixer = AudioSystem.getMixer(mixers[index]);
+            DataLine.Info lineInfo = new DataLine.Info(SourceDataLine.class, null);
+            if (!mixer.isLineSupported(lineInfo)) {
+                throw new IOException("Audio device index " + selector + " is not an output playback device");
+            }
+            return mixers[index];
+        }
+
+        Mixer.Info exactMatch = null;
+        Mixer.Info partialMatch = null;
+        String wanted = selector.trim().toLowerCase(Locale.ROOT);
+        DataLine.Info playbackLine = new DataLine.Info(SourceDataLine.class, null);
+        for (Mixer.Info info : mixers) {
+            Mixer mixer = AudioSystem.getMixer(info);
+            if (!mixer.isLineSupported(playbackLine)) {
+                continue;
+            }
+
+            String name = info.getName();
+            if (name != null && name.equalsIgnoreCase(selector.trim())) {
+                exactMatch = info;
+                break;
+            }
+
+            String normalizedName = (name == null) ? "" : name.toLowerCase(Locale.ROOT);
+            String normalizedDescription = (info.getDescription() == null)
+                    ? ""
+                    : info.getDescription().toLowerCase(Locale.ROOT);
+            if (partialMatch == null
+                    && (normalizedName.contains(wanted) || normalizedDescription.contains(wanted))) {
+                partialMatch = info;
+            }
+        }
+
+        if (exactMatch != null) {
+            return exactMatch;
+        }
+        if (partialMatch != null) {
+            return partialMatch;
+        }
+        throw new IOException("No matching output device for selector '" + selector + "'; use --devs to list devices");
+    }
+
+    private static Integer parseInteger(String value) {
+        if (isBlank(value)) {
+            return null;
+        }
+        String candidate = value.trim();
+        if (!candidate.matches("-?\\d+")) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(candidate);
+        } catch (NumberFormatException numberFormatException) {
+            return null;
+        }
+    }
+
+    private static String describeMixer(Mixer.Info info) {
+        if (info == null) {
+            return "default mixer";
+        }
+
+        String description = info.getDescription();
+        if (isBlank(description)) {
+            return info.getName();
+        }
+        return info.getName() + " (" + description + ")";
     }
 
     private static boolean audioFormatsEquivalent(AudioFormat first, AudioFormat second) {
@@ -1715,5 +1956,18 @@ public class StreamRecorder {
             return "stdin:" + sampleRate + "," + encoding + "," + channels;
         }
         return (streamUrl != null) ? streamUrl.toString() : "unknown";
+    }
+
+    private static final class DeviceOutputSession {
+        private final SourceDataLine line;
+        private final AudioFormat format;
+        @SuppressWarnings("unused")
+        private final Mixer.Info mixerInfo;
+
+        private DeviceOutputSession(SourceDataLine line, AudioFormat format, Mixer.Info mixerInfo) {
+            this.line = line;
+            this.format = format;
+            this.mixerInfo = mixerInfo;
+        }
     }
 }
