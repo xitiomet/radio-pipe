@@ -3496,7 +3496,14 @@ function normalize_config(array $input, string $defaultOutputDir): array
 
 	$resampleRateRaw = trim((string)($input['resampleRate'] ?? ''));
 	$resampleRate = 0;
+	$resampleRateRawLower = strtolower($resampleRateRaw);
+	if ($resampleRateRawLower === '0' || $resampleRateRawLower === 'off' || $resampleRateRawLower === 'none' || $resampleRateRawLower === 'false' || $resampleRateRawLower === 'disabled') {
+		$resampleRateRaw = '';
+	}
 	if ($resampleRateRaw !== '') {
+		if (!preg_match('/^\d+$/', $resampleRateRaw)) {
+			throw new RuntimeException('RTL resample rate must be a positive integer or Off.');
+		}
 		$resampleRate = (int)$resampleRateRaw;
 		if ($resampleRate <= 0 || $resampleRate > 384000) {
 			throw new RuntimeException('RTL resample rate must be between 1 and 384000.');
@@ -9207,6 +9214,7 @@ function buildResetConfig(deviceId, currentConfig)
 	var sourceConfig = (currentConfig && typeof currentConfig === 'object' && !Array.isArray(currentConfig))
 		? currentConfig
 		: {};
+	defaults.biasT = isBiasTEnabledValue(sourceConfig.biasT) ? '1' : '0';
 	var deviceIndex = normalizeClientDeviceIndex(String(sourceConfig.deviceIndex || getDeviceIndexForId(deviceId) || defaults.deviceIndex || ''));
 	var preserveDeviceMountLink = resolveMountLinkModeForConfig(sourceConfig, deviceIndex) === 'device';
 
@@ -9718,7 +9726,7 @@ function buildPipelineStagePreviewLines(config)
 	var followName = mountLinkMode === 'name';
 	var mount = normalizeMountByFormat(source.streamMount, streamName, streamFormat, followName, followDevice, deviceIndex);
 
-	var streamSampleRate = (['22050', '44100', '48000'].indexOf(String(source.streamSampleRate || '')) !== -1) ? String(source.streamSampleRate) : '44100';
+	var streamSampleRate = (['22050', '44100', '48000', '96000'].indexOf(String(source.streamSampleRate || '')) !== -1) ? String(source.streamSampleRate) : '44100';
 	var rtlLine = 'rtl_fm';
 	var frequency = String(source.frequency || '').trim();
 	if (frequency !== '') {
@@ -9728,7 +9736,7 @@ function buildPipelineStagePreviewLines(config)
 	var rtlBandwidth = String(source.rtlBandwidth || '12000');
 	var resampleRate = String(source.resampleRate || '').trim();
 	var effectiveStdinRate = resampleRate !== '' ? resampleRate : rtlBandwidth;
-	rtlLine += ' -s ' + rtlBandwidth + ' -r ' + effectiveStdinRate;
+	rtlLine += ' -s ' + rtlBandwidth +  ' -r ' + effectiveStdinRate;
 	var squelch = String(source.squelch || '').trim();
 	if (squelch !== '') {
 		rtlLine += ' -l ' + squelch;
@@ -11546,6 +11554,9 @@ function renderDeviceList()
 					'<div class="form-row single output-recorder-only output-after-record-command hidden">' +
 						'<div><label>Run Command Argument (-x)</label><input type="text" class="field-post-command-arg" value="' + escapeHtml(String(config.postCommandArg || '')) + '" placeholder="Argument passed directly to -x"></div>' +
 					'</div>' +
+					'<div class="form-row single template-button-row">' +
+						'<div><button type="button" class="refresh-button primary action-apply-config">Apply</button></div>' +
+					'</div>' +
 					'<div class="form-row single">' +
 						'<div><label>Template</label><select class="field-template-name">' + templateSelectOptions + '</select></div>' +
 					'</div>' +
@@ -12332,6 +12343,22 @@ function bindDeviceCard(card)
 		saveTemplateStartButton.textContent = knownInstancesByDevice[deviceId] ? 'Save Template + Retune' : 'Save Template + Start';
 		saveTemplateStartButton.addEventListener('click', function () {
 			saveTemplateFromCard(true);
+		});
+	}
+
+	var applyConfigButton = card.querySelector('.action-apply-config');
+	if (applyConfigButton) {
+		applyConfigButton.addEventListener('click', function () {
+			if (knownInstancesByDevice[deviceId]) {
+				startOrRetuneCard(card);
+				return;
+			}
+			var config = readCardConfig(card);
+			deviceConfigsById[String(deviceId)] = config;
+			saveDeviceConfigs(String(deviceId));
+			openConfigPanelsByDevice[String(deviceId)] = false;
+			renderDeviceList();
+			setStatus('Applied config changes for device ' + deviceId + '.', false);
 		});
 	}
 
