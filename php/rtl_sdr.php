@@ -8,6 +8,7 @@ $DESIRED_STATE_FILE = __DIR__ . '/rtl_sdr_desired_state.json';
 $STREAMING_SERVERS_FILE = __DIR__ . '/streaming_servers.json';
 $RECORDING_SERVERS_FILE = __DIR__ . '/recording_servers.json';
 $UI_SETTINGS_FILE = __DIR__ . '/rtl_sdr_ui_settings.json';
+$PIPE_OUTPUTS_FILE = __DIR__ . '/pipe_outputs.json';
 $TEMPLATES_FILE = __DIR__ . '/rtl_sdr_templates.json';
 $LOG_DIR = __DIR__ . '/rtl_sdr_logs';
 $recordingsRoot = __DIR__ . '/recordings';
@@ -970,6 +971,108 @@ function default_ui_settings(): array
 	);
 }
 
+function normalize_pipe_output_presets(array $rawPresets): array
+{
+	$normalized = array();
+	foreach ($rawPresets as $rawKey => $rawPreset) {
+		$key = trim((string)$rawKey);
+		if ($key === '' || !is_array($rawPreset)) {
+			continue;
+		}
+
+		// New format: name is the key. Old format: numeric key + 'name' field inside.
+		$hasNameField = isset($rawPreset['name']) && trim((string)$rawPreset['name']) !== '';
+		if (ctype_digit($key) && $hasNameField) {
+			$name = trim((string)$rawPreset['name']);
+		} else {
+			$name = $key;
+		}
+		if ($name === '') {
+			continue;
+		}
+
+		$entries = normalize_pipe_output_entries($rawPreset['pipeOutputs'] ?? ($rawPreset['entries'] ?? array()));
+		$rawSettings = normalize_pipe_output_raw_settings($rawPreset['raw'] ?? $rawPreset);
+		$normalized[$name] = array(
+			'pipeOutputs' => $entries,
+			'raw' => $rawSettings,
+		);
+	}
+
+	return $normalized;
+}
+
+function build_preset_id_to_name_map(array $rawPresets): array
+{
+	$map = array();
+	foreach ($rawPresets as $key => $value) {
+		$keyStr = trim((string)$key);
+		if (ctype_digit($keyStr) && is_array($value) && isset($value['name']) && trim((string)$value['name']) !== '') {
+			$map[$keyStr] = trim((string)$value['name']);
+		}
+	}
+	return $map;
+}
+
+function migrate_pipe_output_preset_ids_in_settings(string $uiSettingsFile, array $idToNameMap): void
+{
+	if (!file_exists($uiSettingsFile) || empty($idToNameMap)) {
+		return;
+	}
+
+	$raw = file_get_contents($uiSettingsFile);
+	if (!is_string($raw) || trim($raw) === '') {
+		return;
+	}
+
+	$decoded = json_decode($raw, true);
+	if (!is_array($decoded)) {
+		return;
+	}
+
+	$deviceConfigs = isset($decoded['deviceConfigs']) && is_array($decoded['deviceConfigs'])
+		? $decoded['deviceConfigs']
+		: array();
+
+	$changed = false;
+	foreach ($deviceConfigs as $deviceId => &$config) {
+		if (!is_array($config)) {
+			continue;
+		}
+		$presetIds = isset($config['pipeOutputPresetIds']) && is_array($config['pipeOutputPresetIds'])
+			? $config['pipeOutputPresetIds']
+			: array();
+		$newIds = array();
+		foreach ($presetIds as $pid) {
+			$pidStr = trim((string)$pid);
+			if (isset($idToNameMap[$pidStr])) {
+				$newIds[] = $idToNameMap[$pidStr];
+				$changed = true;
+			} else {
+				$newIds[] = $pidStr;
+			}
+		}
+		$config['pipeOutputPresetIds'] = $newIds;
+
+		if (isset($config['pipeOutputPresetId'])) {
+			$legacyId = trim((string)$config['pipeOutputPresetId']);
+			if (isset($idToNameMap[$legacyId])) {
+				$config['pipeOutputPresetId'] = $idToNameMap[$legacyId];
+				$changed = true;
+			}
+		}
+	}
+	unset($config);
+
+	if ($changed) {
+		$decoded['deviceConfigs'] = $deviceConfigs;
+		$reencoded = json_encode($decoded, JSON_PRETTY_PRINT);
+		if (is_string($reencoded)) {
+			file_put_contents($uiSettingsFile, $reencoded . "\n", LOCK_EX);
+		}
+	}
+}
+
 function normalize_templates(array $rawTemplates): array
 {
 	$templates = array();
@@ -1486,12 +1589,67 @@ function save_templates(string $filePath, array $templates): bool
 	return file_put_contents($filePath, $encoded . "\n", LOCK_EX) !== false;
 }
 
-function ui_settings_for_response(array $settings): array
+function ui_settings_for_response(array $settings, array $pipeOutputs = array()): array
 {
 	return array(
 		'deviceConfigs' => (object)($settings['deviceConfigs'] ?? array()),
 		'antennaDescriptionsBySerial' => (object)($settings['antennaDescriptionsBySerial'] ?? array()),
+		'pipeOutputPresets' => (object)$pipeOutputs,
 	);
+}
+
+function load_pipe_outputs(string $filePath, string $migrateFromSettingsFile = ''): array
+{
+	if (!file_exists($filePath)) {
+		if ($migrateFromSettingsFile !== '' && file_exists($migrateFromSettingsFile)) {
+			$rawSettings = json_decode((string)file_get_contents($migrateFromSettingsFile), true);
+			if (is_array($rawSettings) && isset($rawSettings['pipeOutputPresets']) && is_array($rawSettings['pipeOutputPresets'])) {
+				$idToNameMap = build_preset_id_to_name_map($rawSettings['pipeOutputPresets']);
+				$presets = normalize_pipe_output_presets($rawSettings['pipeOutputPresets']);
+				if (!empty($presets)) {
+					save_pipe_outputs($filePath, $presets);
+					if (!empty($idToNameMap)) {
+						migrate_pipe_output_preset_ids_in_settings($migrateFromSettingsFile, $idToNameMap);
+					}
+					return $presets;
+				}
+			}
+		}
+		return array();
+	}
+
+	$raw = file_get_contents($filePath);
+	if (!is_string($raw) || trim($raw) === '') {
+		return array();
+	}
+
+	$decoded = json_decode($raw, true);
+	if (!is_array($decoded)) {
+		return array();
+	}
+
+	// Detect and migrate old numeric-keyed format
+	$idToNameMap = build_preset_id_to_name_map($decoded);
+	$normalized = normalize_pipe_output_presets($decoded);
+	if (!empty($idToNameMap)) {
+		save_pipe_outputs($filePath, $normalized);
+		if ($migrateFromSettingsFile !== '') {
+			migrate_pipe_output_preset_ids_in_settings($migrateFromSettingsFile, $idToNameMap);
+		}
+	}
+
+	return $normalized;
+}
+
+function save_pipe_outputs(string $filePath, array $presets): bool
+{
+	$normalized = normalize_pipe_output_presets($presets);
+	$encoded = json_encode((object)$normalized, JSON_PRETTY_PRINT);
+	if (!is_string($encoded)) {
+		return false;
+	}
+
+	return file_put_contents($filePath, $encoded . "\n", LOCK_EX) !== false;
 }
 
 if (!file_exists($STREAMING_SERVERS_FILE)) {
@@ -1610,6 +1768,161 @@ function parse_boolean_flag($value, bool $default): bool
 	}
 
 	return $default;
+}
+
+function normalize_pipe_output_entries($value): array
+{
+	$entries = array();
+
+	if (is_string($value)) {
+		$split = preg_split('/\r\n|\r|\n/', $value);
+		$value = is_array($split) ? $split : array($value);
+	}
+
+	if (!is_array($value)) {
+		return $entries;
+	}
+
+	foreach ($value as $entry) {
+		$enabled = true;
+		$rawOptions = '';
+
+		if (is_array($entry)) {
+			if (array_key_exists('enabled', $entry)) {
+				$enabled = parse_boolean_flag($entry['enabled'], true);
+			}
+			$rawOptions = trim((string)($entry['options'] ?? ($entry['raw'] ?? ($entry['value'] ?? ''))));
+		} else {
+			$rawOptions = trim((string)$entry);
+		}
+
+		if (!$enabled || $rawOptions === '') {
+			continue;
+		}
+
+		if (preg_match('/[\x00\r\n]/', $rawOptions) === 1) {
+			continue;
+		}
+
+		$entries[] = $rawOptions;
+		if (count($entries) >= 16) {
+			break;
+		}
+	}
+
+	return $entries;
+}
+
+function normalize_pipe_output_raw_settings($raw): array
+{
+	$source = is_array($raw) ? $raw : array();
+	$enabled = parse_boolean_flag($source['enabled'] ?? ($source['pipeOutputRaw'] ?? 0), false);
+
+	$bits = trim((string)($source['bits'] ?? ($source['pipeOutputBits'] ?? '')));
+	if ($bits !== '' && preg_match('/^[0-9]{1,2}$/', $bits) !== 1) {
+		$bits = '';
+	}
+
+	$channels = trim((string)($source['channels'] ?? ($source['pipeOutputChannels'] ?? '')));
+	if ($channels !== '' && preg_match('/^[0-9]{1,2}$/', $channels) !== 1) {
+		$channels = '';
+	}
+
+	$rate = trim((string)($source['rate'] ?? ($source['pipeOutputRate'] ?? '')));
+	if ($rate !== '' && preg_match('/^[0-9]{2,6}$/', $rate) !== 1) {
+		$rate = '';
+	}
+
+	$unsigned = parse_boolean_flag($source['unsigned'] ?? ($source['pipeOutputUnsigned'] ?? 0), false);
+	$bigEndian = parse_boolean_flag($source['bigEndian'] ?? ($source['pipeOutputBigEndian'] ?? 0), false);
+
+	$hasPad = array_key_exists('pad', $source) || array_key_exists('pipeOutputPad', $source);
+	$pad = $hasPad
+		? parse_boolean_flag($source['pad'] ?? ($source['pipeOutputPad'] ?? 0), false)
+		: $enabled;
+
+	$padDelay = trim((string)($source['padDelay'] ?? ($source['pipeOutputPadDelay'] ?? '')));
+	if ($padDelay !== '' && preg_match('/^[0-9]{1,6}$/', $padDelay) !== 1) {
+		$padDelay = '';
+	}
+
+	return array(
+		'enabled' => $enabled,
+		'bits' => $bits,
+		'channels' => $channels,
+		'rate' => $rate,
+		'unsigned' => $unsigned,
+		'bigEndian' => $bigEndian,
+		'pad' => $pad,
+		'padDelay' => $padDelay,
+	);
+}
+
+function config_pipe_output_enabled(array $config): bool
+{
+	$outputs = config_pipe_outputs($config);
+	return count($outputs) > 0;
+}
+
+function config_pipe_outputs(array $config): array
+{
+	return normalize_pipe_output_entries($config['pipeOutputs'] ?? array());
+}
+
+function append_pipe_output_args(array &$command, array $config): void
+{
+	$pipeOutputs = config_pipe_outputs($config);
+	if (count($pipeOutputs) === 0) {
+		return;
+	}
+
+	foreach ($pipeOutputs as $pipeOutputOptions) {
+		$command[] = '--pipe-output';
+		$command[] = $pipeOutputOptions;
+	}
+
+	$rawEnabled = parse_boolean_flag($config['pipeOutputRaw'] ?? 0, false);
+	if (!$rawEnabled) {
+		return;
+	}
+
+	$command[] = '--pipe-output-raw';
+
+	$rawBits = trim((string)($config['pipeOutputBits'] ?? ''));
+	if ($rawBits !== '') {
+		$command[] = '--pipe-output-bits';
+		$command[] = $rawBits;
+	}
+
+	$rawChannels = trim((string)($config['pipeOutputChannels'] ?? ''));
+	if ($rawChannels !== '') {
+		$command[] = '--pipe-output-channels';
+		$command[] = $rawChannels;
+	}
+
+	$rawRate = trim((string)($config['pipeOutputRate'] ?? ''));
+	if ($rawRate !== '') {
+		$command[] = '--pipe-output-rate';
+		$command[] = $rawRate;
+	}
+
+	if (parse_boolean_flag($config['pipeOutputUnsigned'] ?? 0, false)) {
+		$command[] = '--pipe-output-unsigned';
+	}
+
+	if (parse_boolean_flag($config['pipeOutputBigEndian'] ?? 0, false)) {
+		$command[] = '--pipe-output-big-endian';
+	}
+
+	$padEnabled = parse_boolean_flag($config['pipeOutputPad'] ?? 0, false);
+	if ($padEnabled) {
+		$command[] = '--pipe-output-pad';
+		$padDelay = trim((string)($config['pipeOutputPadDelay'] ?? ''));
+		if ($padDelay !== '') {
+			$command[] = '--pipe-output-pad-delay';
+			$command[] = $padDelay;
+		}
+	}
 }
 
 function derive_output_mode_label(bool $recordEnabled, bool $streamEnabled): string
@@ -3262,6 +3575,28 @@ function normalize_config(array $input, string $defaultOutputDir): array
 	}
 
 	$autoGainEnabled = parse_boolean_flag($input['autoGain'] ?? ($input['radioPipeAutoGain'] ?? '0'), false);
+	$pipeOutputEnabled = parse_boolean_flag($input['pipeOutputEnabled'] ?? ($input['enablePipeOutput'] ?? '1'), false);
+	$pipeOutputs = normalize_pipe_output_entries($input['pipeOutputs'] ?? ($input['pipeOutputEntries'] ?? ($input['pipeOutput'] ?? array())));
+	$pipeOutputRawEnabled = parse_boolean_flag($input['pipeOutputRaw'] ?? 0, false);
+	$pipeOutputRawBits = trim((string)($input['pipeOutputBits'] ?? ''));
+	if ($pipeOutputRawBits !== '' && preg_match('/^[0-9]{1,2}$/', $pipeOutputRawBits) !== 1) {
+		throw new RuntimeException('Pipe Output Raw bits must be an integer value (for example: 8, 16, 24).');
+	}
+	$pipeOutputRawChannels = trim((string)($input['pipeOutputChannels'] ?? ''));
+	if ($pipeOutputRawChannels !== '' && preg_match('/^[0-9]{1,2}$/', $pipeOutputRawChannels) !== 1) {
+		throw new RuntimeException('Pipe Output Raw channels must be an integer value.');
+	}
+	$pipeOutputRawRate = trim((string)($input['pipeOutputRate'] ?? ''));
+	if ($pipeOutputRawRate !== '' && preg_match('/^[0-9]{2,6}$/', $pipeOutputRawRate) !== 1) {
+		throw new RuntimeException('Pipe Output Raw rate must be a valid sample rate in Hz.');
+	}
+	$pipeOutputRawUnsigned = parse_boolean_flag($input['pipeOutputUnsigned'] ?? 0, false);
+	$pipeOutputRawBigEndian = parse_boolean_flag($input['pipeOutputBigEndian'] ?? 0, false);
+	$pipeOutputPad = parse_boolean_flag($input['pipeOutputPad'] ?? ($pipeOutputRawEnabled ? 1 : 0), false);
+	$pipeOutputPadDelay = trim((string)($input['pipeOutputPadDelay'] ?? ''));
+	if ($pipeOutputPadDelay !== '' && preg_match('/^[0-9]{1,6}$/', $pipeOutputPadDelay) !== 1) {
+		throw new RuntimeException('Pipe Output pad delay must be an integer milliseconds value.');
+	}
 
 	$silence = trim((string)($input['silence'] ?? '2'));
 	$silenceValue = 2.0;
@@ -3456,6 +3791,16 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'threshold' => $thresholdValue,
 		'postGain' => $postGain,
 		'autoGain' => $autoGainEnabled ? 1 : 0,
+		'pipeOutputEnabled' => $pipeOutputEnabled ? 1 : 0,
+		'pipeOutputs' => $pipeOutputs,
+		'pipeOutputRaw' => $pipeOutputRawEnabled ? 1 : 0,
+		'pipeOutputBits' => $pipeOutputRawBits,
+		'pipeOutputChannels' => $pipeOutputRawChannels,
+		'pipeOutputRate' => $pipeOutputRawRate,
+		'pipeOutputUnsigned' => $pipeOutputRawUnsigned ? 1 : 0,
+		'pipeOutputBigEndian' => $pipeOutputRawBigEndian ? 1 : 0,
+		'pipeOutputPad' => $pipeOutputPad ? 1 : 0,
+		'pipeOutputPadDelay' => $pipeOutputPadDelay,
 		'silence' => $silenceValue,
 		'outputMode' => $outputMode,
 		'recordEnabled' => $recordEnabled,
@@ -3634,6 +3979,28 @@ function radio_pipe_supports_auto_gain(): bool
 	return $supports;
 }
 
+function radio_pipe_supports_pipe_output(): bool
+{
+	static $supports = null;
+	if ($supports !== null) {
+		return $supports;
+	}
+
+	if (!command_exists('radio-pipe')) {
+		$supports = false;
+		return $supports;
+	}
+
+	$helpOutput = shell_exec('bash -lc ' . escapeshellarg('radio-pipe --help 2>&1'));
+	if (!is_string($helpOutput) || trim($helpOutput) === '') {
+		$supports = false;
+		return $supports;
+	}
+
+	$supports = stripos($helpOutput, '--pipe-output') !== false;
+	return $supports;
+}
+
 function radio_pipe_supports_api_websocket(): bool
 {
 	static $supports = null;
@@ -3787,6 +4154,8 @@ function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCo
 		$conditionerCommand[] = '--auto-gain';
 	}
 
+	append_pipe_output_args($conditionerCommand, $config);
+
 	array_push(
 		$conditionerCommand,
 		'--stdout',
@@ -3889,6 +4258,8 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 	if (parse_boolean_flag($config['autoGain'] ?? 0, false)) {
 		$recorderCommand[] = '--auto-gain';
 	}
+
+	append_pipe_output_args($recorderCommand, $config);
 
 	$afterRecordHook = build_after_record_hook_argument($config);
 	if ($afterRecordHook !== '') {
@@ -4367,6 +4738,8 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 	$config = $bindingResult['config'];
 	$postGain = trim((string)($config['postGain'] ?? ''));
 	$autoGainEnabled = parse_boolean_flag($config['autoGain'] ?? 0, false);
+	$pipeOutputEnabled = config_pipe_output_enabled($config);
+	$pipeOutputs = config_pipe_outputs($config);
 	$recordEnabled = config_records_enabled($config);
 	$streamEnabled = config_stream_enabled($config);
 	$uploadModeEnabled =
@@ -4405,6 +4778,10 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 
 	if ($autoGainEnabled && !radio_pipe_supports_auto_gain()) {
 		return array('ok' => false, 'error' => 'radio-pipe auto gain is configured but this radio-pipe build does not support --auto-gain.');
+	}
+
+	if (count($pipeOutputs) > 0 && !radio_pipe_supports_pipe_output()) {
+		return array('ok' => false, 'error' => 'radio-pipe pipe-output mode is configured but this radio-pipe build does not support --pipe-output.');
 	}
 
 	if ($streamEnabled && !$recorderSupportsStdoutPad) {
@@ -5340,7 +5717,8 @@ if ($action !== '') {
 
 	if ($action === 'settings_get') {
 		$settings = sync_ui_settings_with_running_state($UI_SETTINGS_FILE, $state);
-		send_json(array('ok' => true, 'settings' => ui_settings_for_response($settings)));
+		$pipeOutputs = load_pipe_outputs($PIPE_OUTPUTS_FILE, $UI_SETTINGS_FILE);
+		send_json(array('ok' => true, 'settings' => ui_settings_for_response($settings, $pipeOutputs)));
 	}
 
 	if ($action === 'settings_set') {
@@ -5391,7 +5769,23 @@ if ($action !== '') {
 			send_json(array('ok' => false, 'error' => 'Failed to save UI settings.'), 500);
 		}
 
-		send_json(array('ok' => true, 'settings' => ui_settings_for_response($settings)));
+		$pipeOutputs = load_pipe_outputs($PIPE_OUTPUTS_FILE, $UI_SETTINGS_FILE);
+		send_json(array('ok' => true, 'settings' => ui_settings_for_response($settings, $pipeOutputs)));
+	}
+
+	if ($action === 'pipe_outputs_set') {
+		$payload = $_POST;
+		if (is_array($jsonPayload) && count($jsonPayload) > 0) {
+			$payload = array_merge($payload, $jsonPayload);
+		}
+
+		$rawPresets = isset($payload['presets']) && is_array($payload['presets']) ? $payload['presets'] : array();
+		$presets = normalize_pipe_output_presets($rawPresets);
+		if (!save_pipe_outputs($PIPE_OUTPUTS_FILE, $presets)) {
+			send_json(array('ok' => false, 'error' => 'Failed to save pipe outputs.'), 500);
+		}
+
+		send_json(array('ok' => true, 'presets' => (object)$presets));
 	}
 
 	if ($action === 'list') {
@@ -5415,10 +5809,11 @@ if ($action !== '') {
 		cleanup_stale_logs_by_device($LOG_DIR);
 		save_state($STATE_FILE, $state);
 		$settings = sync_ui_settings_with_running_state($UI_SETTINGS_FILE, $state);
+		$pipeOutputs = load_pipe_outputs($PIPE_OUTPUTS_FILE, $UI_SETTINGS_FILE);
 		$response = array(
 			'ok' => true,
 			'instances' => list_instances($state),
-			'settings' => ui_settings_for_response($settings),
+			'settings' => ui_settings_for_response($settings, $pipeOutputs),
 		);
 		$response['queue'] = array(
 			'processed' => $queueWorkerEnabled ? (int)($queueResult['processed'] ?? 0) : 0,
@@ -5949,10 +6344,18 @@ if ($action !== '') {
 		.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-bottom: 9px; }
 		.form-row.single { grid-template-columns: 1fr; }
 		.form-row.template-button-row .refresh-button { width: 100%; }
+		.pipe-output-list { display: flex; flex-direction: column; gap: 8px; }
+		.pipe-output-presets-list { display: flex; flex-direction: column; gap: 4px; }
+		.pipe-output-entry-row { display: flex; align-items: center; gap: 8px; }
+		.pipe-output-entry-row .checkbox-label { flex: 1; min-width: 0; }
+		.pipe-output-entry-row .action-edit-pipe-output-preset { flex: 0 0 auto; padding: 4px 8px; font-size: 14px; }
+		.pipe-output-row { display: flex; gap: 8px; align-items: center; }
+		.pipe-output-row .field-pipe-output-entry { flex: 1; }
+		.pipe-output-row .action-remove-pipe-output { flex: 0 0 auto; }
 		label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 5px; }
 		label.checkbox-label { display: flex; align-items: center; gap: 8px; margin-bottom: 0; padding: 10px 0; cursor: pointer; font-size: 12px; user-select: none; }
 		label.checkbox-label input[type="checkbox"] { width: 16px; height: 16px; min-height: unset; flex-shrink: 0; accent-color: var(--accent, #4a9eff); cursor: pointer; }
-		input:not([type="checkbox"]), select {
+		input:not([type="checkbox"]), select, textarea {
 			width: 100%;
 			min-height: 38px;
 			border: 1px solid var(--border);
@@ -6099,6 +6502,46 @@ if ($action !== '') {
 		</div>
 	</div>
 
+	<div id="pipeOutputPresetModal" class="modal hidden">
+		<div class="modal-content">
+			<div class="modal-header">
+				<h3 id="pipeOutputPresetModalTitle">New Pipe Output</h3>
+				<button type="button" class="modal-close" id="pipeOutputPresetModalClose">&times;</button>
+			</div>
+			<div class="modal-body">
+				<div class="form-row single">
+					<div><label>Name</label><input type="text" id="pipeOutputPresetModalName" placeholder="My Pipe Output"></div>
+				</div>
+				<div class="form-row single">
+					<div><label class="checkbox-label"><input type="checkbox" id="pipeOutputPresetModalRawEnabled"> Enable <code>--pipe-output-raw</code></label></div>
+				</div>
+				<div class="form-row">
+					<div><label>Raw Bits (optional)</label><input type="number" min="1" max="32" step="1" id="pipeOutputPresetModalRawBits" placeholder="16"></div>
+					<div><label>Raw Channels (optional)</label><input type="number" min="1" max="8" step="1" id="pipeOutputPresetModalRawChannels" placeholder="1"></div>
+				</div>
+				<div class="form-row">
+					<div><label>Raw Rate Hz (optional)</label><input type="number" min="1" step="1" id="pipeOutputPresetModalRawRate" placeholder="22050"></div>
+					<div style="display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap;">
+						<label class="checkbox-label" style="padding:0;"><input type="checkbox" id="pipeOutputPresetModalRawUnsigned"> Unsigned PCM</label>
+						<label class="checkbox-label" style="padding:0;"><input type="checkbox" id="pipeOutputPresetModalRawBigEndian"> Big Endian</label>
+					</div>
+				</div>
+				<div class="form-row">
+					<div><label class="checkbox-label"><input type="checkbox" id="pipeOutputPresetModalRawPad"> Enable <code>--pipe-output-pad</code></label></div>
+					<div><label>Pad Delay ms (optional)</label><input type="number" min="0" step="1" id="pipeOutputPresetModalRawPadDelay" placeholder="500"></div>
+				</div>
+				<div class="form-row single">
+					<div><label>Commands (one per line)</label><textarea id="pipeOutputPresetModalEntries" rows="6" placeholder="/usr/local/bin/my-consumer --stdin"></textarea></div>
+				</div>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="refresh-button" id="pipeOutputPresetModalCancel">Cancel</button>
+				<button type="button" class="refresh-button primary" id="pipeOutputPresetModalSave">Save</button>
+				<button type="button" class="refresh-button danger hidden" id="pipeOutputPresetModalDelete">Delete</button>
+			</div>
+		</div>
+	</div>
+
 	<div id="antennaModal" class="modal hidden">
 		<div class="modal-content">
 			<div class="modal-header">
@@ -6158,6 +6601,7 @@ var knownInstancesByDevice = {};
 var knownDetectedDevices = [];
 var deviceConfigsById = {};
 var antennaDescriptionsBySerial = {};
+var pipeOutputPresetsById = {};
 var settingsTemplates = {};
 var streamServersById = {};
 var recordingServersById = {};
@@ -6188,6 +6632,8 @@ var pendingDeviceConfigDeletesById = {};
 var lastSavedDeviceConfigFingerprintById = {};
 var pendingAntennaDescriptionsDirty = false;
 var lastSavedAntennaDescriptionsFingerprint = '';
+var pendingPipeOutputPresetsDirty = false;
+var lastSavedPipeOutputPresetsFingerprint = '';
 var templatesSaveInFlight = false;
 var templatesSaveQueued = false;
 var lastSavedTemplatesFingerprint = '';
@@ -6919,7 +7365,8 @@ function normalizeUiSettingsFromServer(settingsPayload)
 		: {};
 	var normalized = {
 		deviceConfigs: {},
-		antennaDescriptionsBySerial: {}
+		antennaDescriptionsBySerial: {},
+		pipeOutputPresets: {}
 	};
 
 	var rawDeviceConfigs = (rawSettings.deviceConfigs && typeof rawSettings.deviceConfigs === 'object' && !Array.isArray(rawSettings.deviceConfigs))
@@ -6966,6 +7413,36 @@ function normalizeUiSettingsFromServer(settingsPayload)
 		normalized.antennaDescriptionsBySerial[normalizedSerial] = normalizedDescription;
 	}
 
+	var rawPresets = (rawSettings.pipeOutputPresets && typeof rawSettings.pipeOutputPresets === 'object' && !Array.isArray(rawSettings.pipeOutputPresets))
+		? rawSettings.pipeOutputPresets
+		: {};
+	for (var rawPresetId in rawPresets) {
+		if (!Object.prototype.hasOwnProperty.call(rawPresets, rawPresetId)) {
+			continue;
+		}
+
+		var normalizedPresetId = String(rawPresetId == null ? '' : rawPresetId).trim();
+		if (normalizedPresetId === '') {
+			continue;
+		}
+
+		var preset = rawPresets[rawPresetId];
+		if (!preset || typeof preset !== 'object' || Array.isArray(preset)) {
+			continue;
+		}
+
+		// Key is the name in new format; fall back to preset.name for old numeric-key migration
+		var presetName = String(preset.name || normalizedPresetId).trim();
+		if (presetName === '') {
+			continue;
+		}
+
+		normalized.pipeOutputPresets[presetName] = {
+			pipeOutputs: normalizeClientPipeOutputEntries(preset.pipeOutputs),
+			raw: normalizeClientPipeOutputRawSettings(preset.raw)
+		};
+	}
+
 	return normalized;
 }
 
@@ -6978,23 +7455,33 @@ function applyUiSettingsFromServerPayload(settingsPayload)
 	var normalizedSettings = normalizeUiSettingsFromServer(settingsPayload);
 	var nextDeviceConfigs = normalizedSettings.deviceConfigs;
 	var nextAntennaDescriptions = normalizedSettings.antennaDescriptionsBySerial;
+	var nextPipeOutputPresets = normalizedSettings.pipeOutputPresets;
 
 	var currentDeviceFingerprint = computeUiSettingsFingerprint(deviceConfigsById);
 	var nextDeviceFingerprint = computeUiSettingsFingerprint(nextDeviceConfigs);
 	var currentAntennaFingerprint = computeUiSettingsFingerprint(antennaDescriptionsBySerial);
 	var nextAntennaFingerprint = computeUiSettingsFingerprint(nextAntennaDescriptions);
+ 	var currentPipeOutputPresetsFingerprint = computeUiSettingsFingerprint(pipeOutputPresetsById);
+	var nextPipeOutputPresetsFingerprint = computeUiSettingsFingerprint(nextPipeOutputPresets);
 
-	if (currentDeviceFingerprint === nextDeviceFingerprint && currentAntennaFingerprint === nextAntennaFingerprint) {
+	if (
+		currentDeviceFingerprint === nextDeviceFingerprint
+		&& currentAntennaFingerprint === nextAntennaFingerprint
+		&& currentPipeOutputPresetsFingerprint === nextPipeOutputPresetsFingerprint
+	) {
 		return false;
 	}
 
 	deviceConfigsById = nextDeviceConfigs;
 	antennaDescriptionsBySerial = nextAntennaDescriptions;
+	pipeOutputPresetsById = nextPipeOutputPresets;
 	pendingDeviceConfigUpsertsById = {};
 	pendingDeviceConfigDeletesById = {};
 	pendingAntennaDescriptionsDirty = false;
+	pendingPipeOutputPresetsDirty = false;
 	rebuildLastSavedDeviceConfigFingerprints(deviceConfigsById);
 	lastSavedAntennaDescriptionsFingerprint = nextAntennaFingerprint;
+	lastSavedPipeOutputPresetsFingerprint = nextPipeOutputPresetsFingerprint;
 	return true;
 }
 
@@ -7098,8 +7585,13 @@ function saveUiSettingsNow()
 		} else {
 			antennaDescriptionsBySerial = antennaDescriptionsToSend;
 		}
+
+		if (responseSettings && responseSettings.pipeOutputPresets && typeof responseSettings.pipeOutputPresets === 'object' && !Array.isArray(responseSettings.pipeOutputPresets)) {
+			pipeOutputPresetsById = normalizeUiSettingsFromServer({ pipeOutputPresets: responseSettings.pipeOutputPresets }).pipeOutputPresets;
+		}
 		lastSavedAntennaDescriptionsFingerprint = computeUiSettingsFingerprint(antennaDescriptionsBySerial);
 		pendingAntennaDescriptionsDirty = false;
+		pendingPipeOutputPresetsDirty = false;
 	}).catch(function (error) {
 		setStatus('Failed to save UI settings: ' + error.message, true);
 		for (var n = 0; n < upsertIds.length; n++) {
@@ -7158,19 +7650,29 @@ function loadUiSettingsFromServer()
 		} else {
 			antennaDescriptionsBySerial = {};
 		}
+		if (settings.pipeOutputPresets && typeof settings.pipeOutputPresets === 'object' && !Array.isArray(settings.pipeOutputPresets)) {
+			pipeOutputPresetsById = normalizeUiSettingsFromServer({ pipeOutputPresets: settings.pipeOutputPresets }).pipeOutputPresets;
+		} else {
+			pipeOutputPresetsById = {};
+		}
 		pendingDeviceConfigUpsertsById = {};
 		pendingDeviceConfigDeletesById = {};
 		pendingAntennaDescriptionsDirty = false;
+		pendingPipeOutputPresetsDirty = false;
 		rebuildLastSavedDeviceConfigFingerprints(deviceConfigsById);
 		lastSavedAntennaDescriptionsFingerprint = computeUiSettingsFingerprint(antennaDescriptionsBySerial);
+		lastSavedPipeOutputPresetsFingerprint = computeUiSettingsFingerprint(pipeOutputPresetsById);
 	}).catch(function () {
 		deviceConfigsById = {};
 		antennaDescriptionsBySerial = {};
+		pipeOutputPresetsById = {};
 		pendingDeviceConfigUpsertsById = {};
 		pendingDeviceConfigDeletesById = {};
 		pendingAntennaDescriptionsDirty = false;
+		pendingPipeOutputPresetsDirty = false;
 		rebuildLastSavedDeviceConfigFingerprints(deviceConfigsById);
 		lastSavedAntennaDescriptionsFingerprint = computeUiSettingsFingerprint(antennaDescriptionsBySerial);
+		lastSavedPipeOutputPresetsFingerprint = computeUiSettingsFingerprint(pipeOutputPresetsById);
 	});
 }
 
@@ -7288,8 +7790,348 @@ function loadRecordingServersFromServer()
 
 var currentEditingServerId = null;
 var currentEditingRecordingServerId = null;
+var currentEditingPipeOutputPresetId = null;
 var currentEditingAntennaDeviceId = '';
 var currentEditingAntennaSerial = '';
+
+function normalizePipeOutputPresetIdList(value)
+{
+	var ids = [];
+	if (Array.isArray(value)) {
+		for (var i = 0; i < value.length; i++) {
+			var id = String(value[i] == null ? '' : value[i]).trim();
+			if (id === '' || ids.indexOf(id) !== -1) {
+				continue;
+			}
+			ids.push(id);
+		}
+		return ids;
+	}
+
+	var single = String(value == null ? '' : value).trim();
+	if (single !== '') {
+		ids.push(single);
+	}
+
+	return ids;
+}
+
+function buildPipeOutputPresetCheckboxesMarkup(selectedPresetIds)
+{
+	var selected = {};
+	var normalizedSelected = normalizePipeOutputPresetIdList(selectedPresetIds);
+	for (var i = 0; i < normalizedSelected.length; i++) {
+		selected[normalizedSelected[i]] = true;
+	}
+
+	var ids = Object.keys(pipeOutputPresetsById).sort(function (a, b) {
+		var aName = String((pipeOutputPresetsById[a] && pipeOutputPresetsById[a].name) || a).toLowerCase();
+		var bName = String((pipeOutputPresetsById[b] && pipeOutputPresetsById[b].name) || b).toLowerCase();
+		if (aName < bName) {
+			return -1;
+		}
+		if (aName > bName) {
+			return 1;
+		}
+		return String(a).localeCompare(String(b));
+	});
+
+	if (!ids.length) {
+		return '<div class="small">No pipe outputs yet. Click New Pipe-Output to create one.</div>';
+	}
+
+	var html = '';
+	for (var index = 0; index < ids.length; index++) {
+		var id = ids[index];
+		var preset = pipeOutputPresetsById[id] || {};
+		html += '<div class="pipe-output-entry-row">';
+		html += '<label class="checkbox-label"><input type="checkbox" class="field-pipe-output-preset-toggle" value="' + escapeHtml(String(id)) + '"' + (selected[id] ? ' checked' : '') + '> ' + escapeHtml(String(preset.name || id)) + '</label>';
+		html += '<button type="button" class="refresh-button compact action-edit-pipe-output-preset" data-preset-id="' + escapeHtml(String(id)) + '" title="Edit">&#9998;</button>';
+		html += '</div>';
+	}
+
+	return html;
+}
+
+function readPipeOutputPresetIdsFromCard(card)
+{
+	var selected = [];
+	if (!card) {
+		return selected;
+	}
+
+	var toggles = card.querySelectorAll('.field-pipe-output-preset-toggle');
+	for (var i = 0; i < toggles.length; i++) {
+		if (!toggles[i].checked) {
+			continue;
+		}
+		var id = String(toggles[i].value || '').trim();
+		if (id === '' || selected.indexOf(id) !== -1) {
+			continue;
+		}
+		selected.push(id);
+	}
+
+	return selected;
+}
+
+function resolvePipeOutputsForConfig(source, explicitPresetIds)
+{
+	var entries = [];
+	var directEntries = normalizeClientPipeOutputEntries(source && source.pipeOutputs);
+	for (var i = 0; i < directEntries.length; i++) {
+		if (entries.indexOf(directEntries[i]) === -1) {
+			entries.push(directEntries[i]);
+		}
+	}
+
+	var presetIds = Array.isArray(explicitPresetIds)
+		? normalizePipeOutputPresetIdList(explicitPresetIds)
+		: normalizePipeOutputPresetIdList(source && source.pipeOutputPresetIds);
+	for (var j = 0; j < presetIds.length; j++) {
+		var preset = getPipeOutputPresetById(presetIds[j]);
+		if (!preset) {
+			continue;
+		}
+		var presetEntries = normalizeClientPipeOutputEntries(preset.pipeOutputs);
+		for (var k = 0; k < presetEntries.length; k++) {
+			if (entries.indexOf(presetEntries[k]) === -1) {
+				entries.push(presetEntries[k]);
+			}
+		}
+	}
+
+	return entries;
+}
+
+function resolvePipeOutputRuntimeConfig(source, explicitPresetIds)
+{
+	var entries = resolvePipeOutputsForConfig(source, explicitPresetIds);
+	var raw = normalizeClientPipeOutputRawSettings({});
+	var rawChosen = false;
+	var presetIds = Array.isArray(explicitPresetIds)
+		? normalizePipeOutputPresetIdList(explicitPresetIds)
+		: normalizePipeOutputPresetIdList(source && source.pipeOutputPresetIds);
+
+	for (var i = 0; i < presetIds.length; i++) {
+		var preset = getPipeOutputPresetById(presetIds[i]);
+		if (!preset) {
+			continue;
+		}
+		var candidate = normalizeClientPipeOutputRawSettings(preset.raw);
+		if (candidate.enabled && !rawChosen) {
+			raw = candidate;
+			rawChosen = true;
+		}
+	}
+
+	return {
+		entries: entries,
+		raw: raw
+	};
+}
+
+function getPipeOutputPresetById(presetId)
+{
+	return pipeOutputPresetsById[presetId] || null;
+}
+
+function refreshPipeOutputPresetSelects()
+{
+	var containers = document.querySelectorAll('.pipe-output-presets-list');
+	for (var i = 0; i < containers.length; i++) {
+		var card = containers[i].closest('.device-card');
+		var selectedIds = readPipeOutputPresetIdsFromCard(card);
+		if (!selectedIds.length && card) {
+			var cardConfig = getConfigForDevice(String(card.getAttribute('data-device-id') || ''));
+			selectedIds = normalizePipeOutputPresetIdList(cardConfig.pipeOutputPresetIds);
+		}
+		containers[i].innerHTML = buildPipeOutputPresetCheckboxesMarkup(selectedIds);
+	}
+}
+
+function savePipeOutputsToServer()
+{
+	var presets = {};
+	for (var presetId in pipeOutputPresetsById) {
+		if (!Object.prototype.hasOwnProperty.call(pipeOutputPresetsById, presetId)) {
+			continue;
+		}
+		var preset = pipeOutputPresetsById[presetId];
+		if (!preset || typeof preset !== 'object' || Array.isArray(preset)) {
+			continue;
+		}
+		var presetName = String(presetId).trim();
+		if (presetName === '') {
+			continue;
+		}
+		presets[presetName] = {
+			pipeOutputs: normalizeClientPipeOutputEntries(preset.pipeOutputs),
+			raw: normalizeClientPipeOutputRawSettings(preset.raw)
+		};
+	}
+
+	return postUserAction('pipe_outputs_set', { presets: presets }).then(function (result) {
+		if (result && result.presets && typeof result.presets === 'object' && !Array.isArray(result.presets)) {
+			pipeOutputPresetsById = normalizeUiSettingsFromServer({ pipeOutputPresets: result.presets }).pipeOutputPresets;
+		}
+		lastSavedPipeOutputPresetsFingerprint = computeUiSettingsFingerprint(pipeOutputPresetsById);
+		pendingPipeOutputPresetsDirty = false;
+	}).catch(function (error) {
+		setStatus('Failed to save pipe outputs: ' + (error.message || 'Unknown error'), true);
+		pendingPipeOutputPresetsDirty = true;
+	});
+}
+
+function openPipeOutputPresetDialog(presetId)
+{
+	currentEditingPipeOutputPresetId = presetId;
+	var modal = document.getElementById('pipeOutputPresetModal');
+	var titleEl = document.getElementById('pipeOutputPresetModalTitle');
+	var nameEl = document.getElementById('pipeOutputPresetModalName');
+	var entriesEl = document.getElementById('pipeOutputPresetModalEntries');
+	var rawEnabledEl = document.getElementById('pipeOutputPresetModalRawEnabled');
+	var rawBitsEl = document.getElementById('pipeOutputPresetModalRawBits');
+	var rawChannelsEl = document.getElementById('pipeOutputPresetModalRawChannels');
+	var rawRateEl = document.getElementById('pipeOutputPresetModalRawRate');
+	var rawUnsignedEl = document.getElementById('pipeOutputPresetModalRawUnsigned');
+	var rawBigEndianEl = document.getElementById('pipeOutputPresetModalRawBigEndian');
+	var rawPadEl = document.getElementById('pipeOutputPresetModalRawPad');
+	var rawPadDelayEl = document.getElementById('pipeOutputPresetModalRawPadDelay');
+	var deleteBtn = document.getElementById('pipeOutputPresetModalDelete');
+
+	if (presetId) {
+		var preset = getPipeOutputPresetById(presetId);
+		if (!preset) {
+			return;
+		}
+
+		titleEl.textContent = 'Edit Pipe Output';
+		nameEl.value = String(presetId);
+		entriesEl.value = normalizeClientPipeOutputEntries(preset.pipeOutputs).join('\n');
+		var raw = normalizeClientPipeOutputRawSettings(preset.raw);
+		rawEnabledEl.checked = raw.enabled;
+		rawBitsEl.value = raw.bits;
+		rawChannelsEl.value = raw.channels;
+		rawRateEl.value = raw.rate;
+		rawUnsignedEl.checked = raw.unsigned;
+		rawBigEndianEl.checked = raw.bigEndian;
+		rawPadEl.checked = raw.pad;
+		rawPadDelayEl.value = raw.padDelay;
+		deleteBtn.classList.remove('hidden');
+	} else {
+		titleEl.textContent = 'New Pipe Output';
+		nameEl.value = '';
+		entriesEl.value = '';
+		rawEnabledEl.checked = false;
+		rawBitsEl.value = '';
+		rawChannelsEl.value = '';
+		rawRateEl.value = '';
+		rawUnsignedEl.checked = false;
+		rawBigEndianEl.checked = false;
+		rawPadEl.checked = true;
+		rawPadDelayEl.value = '';
+		deleteBtn.classList.add('hidden');
+	}
+
+	modal.classList.remove('hidden');
+	nameEl.focus();
+}
+
+function closePipeOutputPresetDialog()
+{
+	var modal = document.getElementById('pipeOutputPresetModal');
+	modal.classList.add('hidden');
+	currentEditingPipeOutputPresetId = null;
+}
+
+function savePipeOutputPreset()
+{
+	var nameEl = document.getElementById('pipeOutputPresetModalName');
+	var entriesEl = document.getElementById('pipeOutputPresetModalEntries');
+	var rawEnabledEl = document.getElementById('pipeOutputPresetModalRawEnabled');
+	var rawBitsEl = document.getElementById('pipeOutputPresetModalRawBits');
+	var rawChannelsEl = document.getElementById('pipeOutputPresetModalRawChannels');
+	var rawRateEl = document.getElementById('pipeOutputPresetModalRawRate');
+	var rawUnsignedEl = document.getElementById('pipeOutputPresetModalRawUnsigned');
+	var rawBigEndianEl = document.getElementById('pipeOutputPresetModalRawBigEndian');
+	var rawPadEl = document.getElementById('pipeOutputPresetModalRawPad');
+	var rawPadDelayEl = document.getElementById('pipeOutputPresetModalRawPadDelay');
+	var name = String(nameEl.value || '').trim();
+	var entries = normalizeClientPipeOutputEntries(String(entriesEl.value || ''));
+	var rawSettings = normalizeClientPipeOutputRawSettings({
+		enabled: !!(rawEnabledEl && rawEnabledEl.checked),
+		bits: rawBitsEl ? rawBitsEl.value : '',
+		channels: rawChannelsEl ? rawChannelsEl.value : '',
+		rate: rawRateEl ? rawRateEl.value : '',
+		unsigned: !!(rawUnsignedEl && rawUnsignedEl.checked),
+		bigEndian: !!(rawBigEndianEl && rawBigEndianEl.checked),
+		pad: !!(rawPadEl && rawPadEl.checked),
+		padDelay: rawPadDelayEl ? rawPadDelayEl.value : ''
+	});
+
+	if (name === '') {
+		setStatus('Preset name is required.', true);
+		return;
+	}
+
+	if (!entries.length) {
+		setStatus('Add at least one pipe-output command.', true);
+		return;
+	}
+
+	var editingId = currentEditingPipeOutputPresetId;
+	if (!editingId && pipeOutputPresetsById[name]) {
+		setStatus('A pipe output named "' + name + '" already exists.', true);
+		return;
+	}
+	if (editingId && editingId !== name) {
+		delete pipeOutputPresetsById[editingId];
+		for (var dId in deviceConfigsById) {
+			if (!Object.prototype.hasOwnProperty.call(deviceConfigsById, dId)) {
+				continue;
+			}
+			var dc = deviceConfigsById[dId];
+			if (!dc || !Array.isArray(dc.pipeOutputPresetIds)) {
+				continue;
+			}
+			var idx = dc.pipeOutputPresetIds.indexOf(editingId);
+			if (idx !== -1) {
+				dc.pipeOutputPresetIds[idx] = name;
+				queueDeviceConfigPersistence(dId, {});
+			}
+		}
+	}
+	pipeOutputPresetsById[name] = {
+		pipeOutputs: entries,
+		raw: rawSettings
+	};
+	pendingPipeOutputPresetsDirty = true;
+	savePipeOutputsToServer();
+	closePipeOutputPresetDialog();
+	refreshPipeOutputPresetSelects();
+	renderDeviceList();
+	setStatus('Pipe output saved.', false);
+}
+
+function deletePipeOutputPreset()
+{
+	if (!currentEditingPipeOutputPresetId) {
+		return;
+	}
+
+	if (!window.confirm('Delete this pipe output preset?')) {
+		return;
+	}
+
+	delete pipeOutputPresetsById[currentEditingPipeOutputPresetId];
+	pendingPipeOutputPresetsDirty = true;
+	savePipeOutputsToServer();
+	closePipeOutputPresetDialog();
+	refreshPipeOutputPresetSelects();
+	renderDeviceList();
+	setStatus('Pipe output deleted.', false);
+}
 
 function openServerDialog(serverId)
 {
@@ -8120,10 +8962,27 @@ function sanitizeTemplateConfig(config)
 	delete clean.outputDir;
 	delete clean.streamMountFollowDevice;
 	delete clean.streamMountLinkMode;
+	delete clean.pipeOutputPresetId;
+	delete clean.pipeOutputPresetsInline;
 	clean.dcs = normalizeClientDcsCode(clean.dcs);
 	clean.ctcss = normalizeClientCtcssTone(clean.ctcss);
 	clean.postGain = normalizeClientPostGainValue(clean.postGain);
 	clean.autoGain = parseClientBooleanFlag(clean.autoGain, false) ? '1' : '0';
+	clean.pipeOutputEnabled = parseClientBooleanFlag(clean.pipeOutputEnabled, false) ? '1' : '0';
+	clean.pipeOutputs = normalizeClientPipeOutputEntries(clean.pipeOutputs);
+	clean.pipeOutputPresetIds = normalizePipeOutputPresetIdList(clean.pipeOutputPresetIds);
+	var tplInlinePresets = {};
+	for (var tpIdx = 0; tpIdx < clean.pipeOutputPresetIds.length; tpIdx++) {
+		var tpId = clean.pipeOutputPresetIds[tpIdx];
+		var tpPreset = pipeOutputPresetsById[tpId];
+		if (tpPreset) {
+			tplInlinePresets[tpId] = {
+				pipeOutputs: normalizeClientPipeOutputEntries(tpPreset.pipeOutputs),
+				raw: normalizeClientPipeOutputRawSettings(tpPreset.raw)
+			};
+		}
+	}
+	clean.pipeOutputPresetsInline = tplInlinePresets;
 	clean.streamFormat = String(clean.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
 	clean.streamName = String(clean.streamName || '');
 	var templateFollowName = parseClientBooleanFlag(
@@ -8151,12 +9010,40 @@ function applyTemplateToDevice(deviceId, templateName, currentConfigOverride)
 	var currentBiasT = isBiasTEnabledValue(current.biasT) ? '1' : '0';
 	var merged = Object.assign({}, current, settingsTemplates[name]);
 	merged.biasT = currentBiasT;
+	// Merge inline preset definitions from the template into the global pipe outputs store
+	var tplPresets = merged.pipeOutputPresetsInline;
+	if (tplPresets && typeof tplPresets === 'object' && !Array.isArray(tplPresets)) {
+		var addedFromTemplate = false;
+		for (var tpKey in tplPresets) {
+			if (!Object.prototype.hasOwnProperty.call(tplPresets, tpKey)) {
+				continue;
+			}
+			if (!pipeOutputPresetsById[tpKey]) {
+				var tplPresetValue = tplPresets[tpKey];
+				var tplPresetObj = (tplPresetValue && typeof tplPresetValue === 'object' && !Array.isArray(tplPresetValue))
+					? tplPresetValue
+					: { pipeOutputs: tplPresetValue };
+				pipeOutputPresetsById[tpKey] = {
+					pipeOutputs: normalizeClientPipeOutputEntries(tplPresetObj.pipeOutputs),
+					raw: normalizeClientPipeOutputRawSettings(tplPresetObj.raw)
+				};
+				addedFromTemplate = true;
+			}
+		}
+		if (addedFromTemplate) {
+			savePipeOutputsToServer();
+		}
+	}
+	delete merged.pipeOutputPresetsInline;
 	merged.device = String(deviceId);
 	merged.deviceIndex = normalizeClientDeviceIndex(String(getDeviceIndexForId(deviceId) || merged.deviceIndex || ''));
 	merged.dcs = normalizeClientDcsCode(merged.dcs);
 	merged.ctcss = normalizeClientCtcssTone(merged.ctcss);
 	merged.postGain = normalizeClientPostGainValue(merged.postGain);
 	merged.autoGain = parseClientBooleanFlag(merged.autoGain, false) ? '1' : '0';
+	merged.pipeOutputEnabled = parseClientBooleanFlag(merged.pipeOutputEnabled, false) ? '1' : '0';
+	merged.pipeOutputs = normalizeClientPipeOutputEntries(merged.pipeOutputs);
+	merged.pipeOutputPresetIds = normalizePipeOutputPresetIdList(merged.pipeOutputPresetIds);
 	merged.streamFormat = String(merged.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
 	merged.streamName = String(merged.streamName || '');
 	var templateFollowName = parseClientBooleanFlag(
@@ -8235,6 +9122,9 @@ function getDefaultConfig(deviceId)
 		threshold: '-40',
 		postGain: '',
 		autoGain: '0',
+		pipeOutputEnabled: '1',
+		pipeOutputs: [],
+		pipeOutputPresetIds: [],
 		silence: '2',
 		outputMode: 'recorder',
 		recordEnabled: true,
@@ -8323,6 +9213,197 @@ function normalizeClientPostGainValue(value)
 		return '';
 	}
 	return String(parsed);
+}
+
+function normalizeClientPipeOutputEntries(value)
+{
+	var entries = [];
+	var rawEntries = [];
+	if (Array.isArray(value)) {
+		rawEntries = value;
+	} else if (typeof value === 'string') {
+		rawEntries = String(value).split(/\r\n|\r|\n/);
+	} else {
+		return entries;
+	}
+
+	for (var i = 0; i < rawEntries.length; i++) {
+		var raw = rawEntries[i];
+		if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+			if (Object.prototype.hasOwnProperty.call(raw, 'enabled') && !parseClientBooleanFlag(raw.enabled, true)) {
+				continue;
+			}
+			raw = Object.prototype.hasOwnProperty.call(raw, 'options')
+				? raw.options
+				: (Object.prototype.hasOwnProperty.call(raw, 'raw') ? raw.raw : raw.value);
+		}
+
+		var normalized = String(raw == null ? '' : raw).trim();
+		if (normalized === '') {
+			continue;
+		}
+
+		normalized = normalized.replace(/[\u0000\r\n]+/g, '').trim();
+		if (normalized === '') {
+			continue;
+		}
+
+		entries.push(normalized);
+		if (entries.length >= 16) {
+			break;
+		}
+	}
+
+	return entries;
+}
+
+function normalizeClientPipeOutputRawSettings(value)
+{
+	var source = (value && typeof value === 'object' && !Array.isArray(value)) ? value : {};
+	var enabled = parseClientBooleanFlag(source.enabled, false);
+	var bits = String(source.bits == null ? '' : source.bits).trim();
+	var channels = String(source.channels == null ? '' : source.channels).trim();
+	var rate = String(source.rate == null ? '' : source.rate).trim();
+	var padDelay = String((source.padDelay != null ? source.padDelay : source.pipeOutputPadDelay) == null ? '' : (source.padDelay != null ? source.padDelay : source.pipeOutputPadDelay)).trim();
+
+	if (bits !== '' && !/^[0-9]{1,2}$/.test(bits)) {
+		bits = '';
+	}
+	if (channels !== '' && !/^[0-9]{1,2}$/.test(channels)) {
+		channels = '';
+	}
+	if (rate !== '' && !/^[0-9]{2,6}$/.test(rate)) {
+		rate = '';
+	}
+	if (padDelay !== '' && !/^[0-9]{1,6}$/.test(padDelay)) {
+		padDelay = '';
+	}
+
+	var hasPad = Object.prototype.hasOwnProperty.call(source, 'pad') || Object.prototype.hasOwnProperty.call(source, 'pipeOutputPad');
+	var pad = hasPad
+		? parseClientBooleanFlag(source.pad != null ? source.pad : source.pipeOutputPad, false)
+		: enabled;
+
+	return {
+		enabled: enabled,
+		bits: bits,
+		channels: channels,
+		rate: rate,
+		unsigned: parseClientBooleanFlag(source.unsigned, false),
+		bigEndian: parseClientBooleanFlag(source.bigEndian, false),
+		pad: pad,
+		padDelay: padDelay
+	};
+}
+
+function readPipeOutputEntriesFromCard(card)
+{
+	var entries = [];
+	if (!card) {
+		return entries;
+	}
+
+	var fields = card.querySelectorAll('.field-pipe-output-entry');
+	for (var i = 0; i < fields.length; i++) {
+		var value = String(fields[i].value || '').replace(/[\u0000\r\n]+/g, '').trim();
+		if (value === '') {
+			continue;
+		}
+		entries.push(value);
+		if (entries.length >= 16) {
+			break;
+		}
+	}
+
+	return entries;
+}
+
+function syncPipeOutputFields()
+{
+	// No-op: pipe outputs are always visible; enabled state is per-entry checkbox
+}
+
+function renderPipeOutputRows(card, entries)
+{
+	if (!card) {
+		return;
+	}
+
+	var list = card.querySelector('.pipe-output-list');
+	if (!list) {
+		return;
+	}
+
+	var normalizedEntries = [];
+	if (Array.isArray(entries)) {
+		for (var index = 0; index < entries.length; index++) {
+			var candidate = entries[index];
+			if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+				candidate = Object.prototype.hasOwnProperty.call(candidate, 'options')
+					? candidate.options
+					: (Object.prototype.hasOwnProperty.call(candidate, 'raw') ? candidate.raw : candidate.value);
+			}
+			var normalized = String(candidate == null ? '' : candidate).replace(/[\u0000\r\n]+/g, '').trim();
+			normalizedEntries.push(normalized);
+			if (normalizedEntries.length >= 16) {
+				break;
+			}
+		}
+	} else {
+		normalizedEntries = normalizeClientPipeOutputEntries(entries);
+	}
+
+	if (!normalizedEntries.length) {
+		normalizedEntries = [''];
+	}
+
+	var html = '';
+	for (var i = 0; i < normalizedEntries.length; i++) {
+		html += '' +
+			'<div class="pipe-output-row">' +
+				'<input type="text" class="field-pipe-output-entry" value="' + escapeHtml(String(normalizedEntries[i] || '')) + '" placeholder="COMMAND for --pipe-output (e.g. /usr/local/bin/my-consumer --stdin)">' +
+				'<button type="button" class="refresh-button compact action-remove-pipe-output">Remove</button>' +
+			'</div>';
+	}
+
+	list.innerHTML = html;
+}
+
+function appendPipeOutputPreviewArgs(line, source)
+{
+	var runtime = resolvePipeOutputRuntimeConfig(source);
+	var entries = runtime.entries;
+	for (var i = 0; i < entries.length; i++) {
+		line += ' --pipe-output ' + entries[i];
+	}
+
+	var raw = runtime.raw;
+	if (raw.enabled) {
+		line += ' --pipe-output-raw';
+		if (raw.bits !== '') {
+			line += ' --pipe-output-bits ' + raw.bits;
+		}
+		if (raw.channels !== '') {
+			line += ' --pipe-output-channels ' + raw.channels;
+		}
+		if (raw.rate !== '') {
+			line += ' --pipe-output-rate ' + raw.rate;
+		}
+		if (raw.unsigned) {
+			line += ' --pipe-output-unsigned';
+		}
+		if (raw.bigEndian) {
+			line += ' --pipe-output-big-endian';
+		}
+		if (raw.pad) {
+			line += ' --pipe-output-pad';
+			if (raw.padDelay !== '') {
+				line += ' --pipe-output-pad-delay ' + raw.padDelay;
+			}
+		}
+	}
+
+	return line;
 }
 
 function isBiasTEnabledValue(value)
@@ -8622,6 +9703,7 @@ function buildPipelineStagePreviewLines(config)
 		if (autoGainEnabled) {
 			recorderBothLine += ' --auto-gain';
 		}
+		recorderBothLine = appendPipeOutputPreviewArgs(recorderBothLine, source);
 		lines.push(recorderBothLine);
 	} else if (outputSelection.streamEnabled) {
 		var conditionerLine = 'radio-pipe --stdin';
@@ -8642,6 +9724,7 @@ function buildPipelineStagePreviewLines(config)
 		if (autoGainEnabled) {
 			conditionerLine += ' --auto-gain';
 		}
+		conditionerLine = appendPipeOutputPreviewArgs(conditionerLine, source);
 		lines.push(conditionerLine);
 	} else {
 		var recorderLine = 'radio-pipe --stdin';
@@ -8659,6 +9742,7 @@ function buildPipelineStagePreviewLines(config)
 		if (autoGainEnabled) {
 			recorderLine += ' --auto-gain';
 		}
+		recorderLine = appendPipeOutputPreviewArgs(recorderLine, source);
 		var afterRecordAction = String(source.afterRecordAction || 'none').toLowerCase();
 		if (afterRecordAction !== '' && afterRecordAction !== 'none') {
 			recorderLine += ' --after ' + afterRecordAction;
@@ -9805,6 +10889,15 @@ function getConfigForDevice(deviceId)
 	merged.squelch = normalizeClientSquelchValue(merged.squelch);
 	merged.postGain = normalizeClientPostGainValue(merged.postGain);
 	merged.autoGain = parseClientBooleanFlag(merged.autoGain, false) ? '1' : '0';
+	merged.pipeOutputEnabled = parseClientBooleanFlag(merged.pipeOutputEnabled, false) ? '1' : '0';
+	merged.pipeOutputs = normalizeClientPipeOutputEntries(merged.pipeOutputs);
+	var legacyPipeOutputPresetId = String(merged.pipeOutputPresetId || '').trim();
+	var combinedPipeOutputPresetIds = normalizePipeOutputPresetIdList(merged.pipeOutputPresetIds);
+	if (legacyPipeOutputPresetId !== '' && combinedPipeOutputPresetIds.indexOf(legacyPipeOutputPresetId) === -1) {
+		combinedPipeOutputPresetIds.push(legacyPipeOutputPresetId);
+	}
+	merged.pipeOutputPresetIds = combinedPipeOutputPresetIds;
+	delete merged.pipeOutputPresetId;
 	merged.dcs = normalizeClientDcsCode(merged.dcs);
 	merged.ctcss = normalizeClientCtcssTone(merged.ctcss);
 	merged.streamFormat = String(merged.streamFormat || 'mp3').toLowerCase() === 'ogg' ? 'ogg' : 'mp3';
@@ -10327,6 +11420,12 @@ function renderDeviceList()
 						'<div><label>radio-pipe Gain (dB)</label><input type="text" class="field-post-gain" value="' + escapeHtml(String(config.postGain || '')) + '" placeholder="Optional: -60 to 60"></div>' +
 						'<div><label class="checkbox-label"><input type="checkbox" class="field-auto-gain"' + (parseClientBooleanFlag(config.autoGain, false) ? ' checked' : '') + '> Enable radio-pipe Auto Gain</label></div>' +
 					'</div>' +
+					'<div class="form-row single">' +
+						'<div><label>Pipe Outputs</label><div class="pipe-output-presets-list">' + buildPipeOutputPresetCheckboxesMarkup(config.pipeOutputPresetIds) + '</div></div>' +
+					'</div>' +
+					'<div class="form-row single">' +
+						'<div><button type="button" class="refresh-button action-new-pipe-output-preset">New Pipe-Output</button></div>' +
+					'</div>' +
 					'<div class="form-row output-stream-only hidden">' +
 						'<div><label>Stream Format</label><select class="field-stream-format"><option value="mp3">mp3</option><option value="ogg">ogg</option></select></div>' +
 						'<div><label>Stream Bitrate (kbps)</label><input type="number" min="16" max="320" step="1" class="field-stream-bitrate" value="' + escapeHtml(String(config.streamBitrate || '128')) + '"></div>' +
@@ -10586,6 +11685,7 @@ function readCardConfig(card)
 		streamMountFollowDevice,
 		deviceIndex
 	);
+	var selectedPipeOutputPresetIds = readPipeOutputPresetIdsFromCard(card);
 
 	return {
 		device: persistedDeviceId,
@@ -10604,6 +11704,9 @@ function readCardConfig(card)
 		gain: card.querySelector('.field-gain').value.trim(),
 		postGain: normalizeClientPostGainValue(card.querySelector('.field-post-gain').value),
 		autoGain: !!(card.querySelector('.field-auto-gain') && card.querySelector('.field-auto-gain').checked) ? '1' : '0',
+		pipeOutputEnabled: '1',
+		pipeOutputs: [],
+		pipeOutputPresetIds: selectedPipeOutputPresetIds,
 		dcs: dcsCode,
 		ctcss: ctcssTone,
 		biasT: card.querySelector('.field-bias-t').value.trim(),
@@ -10638,6 +11741,23 @@ function persistCardConfig(card)
 	delete config.outputDir;
 	deviceConfigsById[String(config.device)] = config;
 	saveDeviceConfigs(String(config.device));
+}
+
+function buildRuntimeConfigForSubmission(config)
+{
+	var runtimeConfig = Object.assign({}, config || {});
+	var selectedPresetIds = normalizePipeOutputPresetIdList(runtimeConfig.pipeOutputPresetIds);
+	var runtime = resolvePipeOutputRuntimeConfig(runtimeConfig, selectedPresetIds);
+	runtimeConfig.pipeOutputs = runtime.entries;
+	runtimeConfig.pipeOutputRaw = runtime.raw.enabled ? '1' : '0';
+	runtimeConfig.pipeOutputBits = runtime.raw.bits;
+	runtimeConfig.pipeOutputChannels = runtime.raw.channels;
+	runtimeConfig.pipeOutputRate = runtime.raw.rate;
+	runtimeConfig.pipeOutputUnsigned = runtime.raw.unsigned ? '1' : '0';
+	runtimeConfig.pipeOutputBigEndian = runtime.raw.bigEndian ? '1' : '0';
+	runtimeConfig.pipeOutputPad = runtime.raw.pad ? '1' : '0';
+	runtimeConfig.pipeOutputPadDelay = runtime.raw.padDelay;
+	return runtimeConfig;
 }
 
 function editAntennaDescriptionForDevice(deviceId)
@@ -10815,7 +11935,10 @@ function bindDeviceCard(card)
 	var postCommandArgInput = card.querySelector('.field-post-command-arg');
 	var postGainInput = card.querySelector('.field-post-gain');
 	var autoGainCheckbox = card.querySelector('.field-auto-gain');
+	var pipeOutputPresetsList = card.querySelector('.pipe-output-presets-list');
+	var newPipeOutputPresetButton = card.querySelector('.action-new-pipe-output-preset');
 	var storedConfig = getConfigForDevice(deviceId);
+	var selectedPresetIds = normalizePipeOutputPresetIdList(storedConfig.pipeOutputPresetIds);
 	modeSelect.value = storedConfig.mode || 'fm';
 	bandwidthSelect.value = String(storedConfig.rtlBandwidth || '12000');
 	if (postGainInput) {
@@ -10824,6 +11947,10 @@ function bindDeviceCard(card)
 	if (autoGainCheckbox) {
 		autoGainCheckbox.checked = parseClientBooleanFlag(storedConfig.autoGain, false);
 	}
+	if (pipeOutputPresetsList) {
+		pipeOutputPresetsList.innerHTML = buildPipeOutputPresetCheckboxesMarkup(selectedPresetIds);
+	}
+	syncPipeOutputFields();
 	if (biasTSelect) {
 		biasTSelect.value = isBiasTEnabledValue(storedConfig.biasT) ? '1' : '0';
 	}
@@ -10878,6 +12005,29 @@ function bindDeviceCard(card)
 		afterRecordSelect.addEventListener('change', function () {
 			syncAfterRecordFields(card);
 			persistCardConfig(card);
+		});
+	}
+	if (pipeOutputPresetsList) {
+		pipeOutputPresetsList.addEventListener('change', function (event) {
+			var target = event.target;
+			if (target && target.classList && target.classList.contains('field-pipe-output-preset-toggle')) {
+				persistCardConfig(card);
+			}
+		});
+		pipeOutputPresetsList.addEventListener('click', function (event) {
+			var target = event.target;
+			if (!target || !target.classList || !target.classList.contains('action-edit-pipe-output-preset')) {
+				return;
+			}
+			var presetId = String(target.getAttribute('data-preset-id') || '').trim();
+			if (presetId !== '') {
+				openPipeOutputPresetDialog(presetId);
+			}
+		});
+	}
+	if (newPipeOutputPresetButton) {
+		newPipeOutputPresetButton.addEventListener('click', function () {
+			openPipeOutputPresetDialog(null);
 		});
 	}
 	streamFormatSelect.addEventListener('change', function () {
@@ -11350,7 +12500,7 @@ function startOrRetuneCard(card)
 	};
 
 	if (requestedAction !== 'retune') {
-		postActionWithConfig(config);
+		postActionWithConfig(buildRuntimeConfigForSubmission(config));
 		return;
 	}
 
@@ -11359,7 +12509,7 @@ function startOrRetuneCard(card)
 	}).finally(function () {
 		var latestConfig = Object.assign({}, getConfigForDevice(normalizedDeviceId), readCardConfig(card));
 		latestConfig.device = String(config.device || latestConfig.device || normalizedDeviceId);
-		postActionWithConfig(latestConfig);
+		postActionWithConfig(buildRuntimeConfigForSubmission(latestConfig));
 	});
 }
 
@@ -11563,7 +12713,7 @@ function initializePage()
 			(function (deviceId) {
 				sequence = sequence.then(function () {
 					var config = getConfigForDevice(deviceId);
-					return postUserAction('start', config).then(function (result) {
+					return postUserAction('start', buildRuntimeConfigForSubmission(config)).then(function (result) {
 						startedCount++;
 						if (result && Array.isArray(result.instances)) {
 							latestInstances = result.instances;
@@ -11725,6 +12875,22 @@ function initializePage()
 		}
 	});
 
+	document.getElementById('pipeOutputPresetModalClose').addEventListener('click', closePipeOutputPresetDialog);
+	document.getElementById('pipeOutputPresetModalCancel').addEventListener('click', closePipeOutputPresetDialog);
+	document.getElementById('pipeOutputPresetModalSave').addEventListener('click', savePipeOutputPreset);
+	document.getElementById('pipeOutputPresetModalDelete').addEventListener('click', deletePipeOutputPreset);
+	document.getElementById('pipeOutputPresetModal').addEventListener('click', function (e) {
+		if (e.target === this) {
+			closePipeOutputPresetDialog();
+		}
+	});
+	document.getElementById('pipeOutputPresetModalEntries').addEventListener('keydown', function (e) {
+		if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+			e.preventDefault();
+			savePipeOutputPreset();
+		}
+	});
+
 	document.getElementById('antennaModalClose').addEventListener('click', closeAntennaDialog);
 	document.getElementById('antennaModalCancel').addEventListener('click', closeAntennaDialog);
 	document.getElementById('antennaModalSave').addEventListener('click', saveAntennaDialog);
@@ -11745,10 +12911,12 @@ function initializePage()
 	Promise.all([loadUiSettingsFromServer(), loadTemplatesFromServer()]).finally(function () {
 		refreshGlobalTemplateSelector();
 		refreshTemplateDeviceSelector();
+		refreshPipeOutputPresetSelects();
 		renderDeviceList();
 		Promise.all([loadStreamServersFromServer(), loadRecordingServersFromServer()]).finally(function () {
 			refreshGlobalTemplateSelector();
 			refreshTemplateDeviceSelector();
+			refreshPipeOutputPresetSelects();
 			renderDeviceList();
 			scanDevices().finally(function () {
 			refreshInstances();
