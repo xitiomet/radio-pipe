@@ -273,7 +273,8 @@ RadioPipe uses one internal processing path regardless of whether audio comes fr
 4. Audio is processed in small chunks and evaluated by the gate stages described below.
 5. If the gate is open, audio is counted as active sound and starts or continues a clip.
 6. If a clip is already open and the gate closes, RadioPipe keeps appending the non-passing tail until the configured silence timeout expires, then closes the clip.
-7. Post-gate gain is applied before output when configured:
+7. Optional post-gate processing is applied before output when configured:
+  * `--voice-filter` applies a voice band-pass (`300-3400 Hz`) to passing audio
   * `--gain <dB>` adds fixed gain (or attenuation)
   * `--auto-gain` adds automatic boost toward a target loudness
 8. When a clip closes:
@@ -438,7 +439,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * **Output modes**: file recording with `-o`, clip/WAV stdout with `--stdout`, raw stdout with `--stdout-raw`, continuous padded raw stream with `--stdout-pad`
 * **Audio/clip parameters**: `-t`, `-s`, `-r`, `-c`, `-b`
 * **Tone/code gating**: `--dcs`, `--ctcss`, `--gate-hold`
-* **Post-gate gain**: `--gain`, `--auto-gain`
+* **Post-gate processing**: `--voice-filter`, `--gain`, `--auto-gain`
 * **Naming/automation**: `-n`, `-x`
 * **WebSocket API**: `--api-websocket`
 
@@ -475,6 +476,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * --dcs <CODE> – optional DCS gate code (octal, example `023`); clip audio only while matching DCS is detected
 * --ctcss <HZ> – optional CTCSS gate tone in Hz (example `100.0`); clip audio only while matching tone is detected
 * --gate-hold <SECONDS> – additional grace time to keep DCS/CTCSS gates open after decode drops (default `0`)
+* --voice-filter – apply post-gate voice band-pass filtering (`300-3400 Hz`) before gain/output
 * --gain <DB> – fixed post-gate gain in dB before recording/stdout (range `-60` to `+60`, default `0`)
 * --auto-gain – enable automatic post-gate boost toward target level (applies after gates, before recording/stdout)
 * --api-websocket <HOST:PORT> – start embedded websocket API server and publish recorder events (example `0.0.0.0:9000`)
@@ -512,6 +514,8 @@ When using both --dcs and --ctcss, both gates must match for clips to open.
 `--gain` applies fixed post-gate gain (or attenuation) after gate decisions and before recording/stdout output.
 
 `--auto-gain` adds automatic post-gate boost on passing audio frames; it can be combined with `--gain`.
+
+`--voice-filter` applies a post-gate voice-focused band-pass (`300-3400 Hz`) to passing audio frames before gain/output.
 
 When using --stdout without -o, recordings are not written to disk (stdout-only mode).
 
