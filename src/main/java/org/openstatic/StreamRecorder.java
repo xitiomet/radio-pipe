@@ -46,7 +46,7 @@ public class StreamRecorder {
     private static final long STDOUT_READ_POLL_MILLIS = 20L;
     private static final long DEFAULT_STDOUT_PAD_DELAY_MILLIS = 500L;
     private static final long DEFAULT_INPUT_DEJITTER_MILLIS = 250L;
-    private static final long PIPE_RESTART_BACKOFF_MILLIS = 1000L;
+    private static final long PIPE_RESTART_BACKOFF_MILLIS = 10000L;
     private static final double AUTO_GAIN_TARGET_DB = -12.0;
     private static final double AUTO_GAIN_MAX_DB = 30.0;
     private final URL streamUrl;
