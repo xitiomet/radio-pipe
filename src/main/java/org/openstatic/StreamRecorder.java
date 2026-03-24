@@ -999,6 +999,10 @@ public class StreamRecorder {
 
             boolean gateAllowsAudio = dcsMatch && ctcssMatch && rmsGateOpen;
             boolean includeFrameInClip = gateAllowsAudio || activelyRecording;
+            byte[] frameForOutput = currentBuffer;
+            if (includeFrameInClip && !gateAllowsAudio && activelyRecording) {
+                frameForOutput = new byte[n];
+            }
             if (includeFrameInClip) {
                 double frameGainDb = this.outputGainDb;
                 if (this.autoGainEnabled && gateAllowsAudio) {
@@ -1054,27 +1058,27 @@ public class StreamRecorder {
             if (this.stdoutEnabled && this.stdoutRawMode) {
                 if (this.stdoutPadMode) {
                     byte[] stdoutFrame = includeFrameInClip
-                            ? Arrays.copyOf(currentBuffer, n)
+                            ? Arrays.copyOf(frameForOutput, n)
                             : new byte[n];
                     stdoutPadBuffer.addLast(stdoutFrame);
                     drainStdoutPadBuffer(stdoutPadBuffer, n, processingFormat);
                 } else if (includeFrameInClip) {
-                    writeStdoutRaw(currentBuffer, n, processingFormat);
+                    writeStdoutRaw(frameForOutput, n, processingFormat);
                 }
             }
             if (!pipeSessions.isEmpty() && this.pipeRawMode) {
                 if (this.pipeRawPadMode) {
                     byte[] pipeFrame = includeFrameInClip
-                            ? Arrays.copyOf(currentBuffer, n)
+                            ? Arrays.copyOf(frameForOutput, n)
                             : new byte[n];
                     pipePadBuffer.addLast(pipeFrame);
                     drainPipePadBuffer(pipePadBuffer, n, processingFormat, pipeSessions);
                 } else if (includeFrameInClip) {
-                    writePipeRaw(pipeSessions, currentBuffer, n, processingFormat);
+                    writePipeRaw(pipeSessions, frameForOutput, n, processingFormat);
                 }
             }
             if (deviceOutputSession != null && includeFrameInClip) {
-                writeDeviceOutput(deviceOutputSession, currentBuffer, n, processingFormat);
+                writeDeviceOutput(deviceOutputSession, frameForOutput, n, processingFormat);
             }
 
             if (gateAllowsAudio) {
@@ -1086,14 +1090,14 @@ public class StreamRecorder {
                     }
                     publishEvent("audioDetected");
                 }
-                chunk.write(currentBuffer, 0, n);
+                chunk.write(frameForOutput, 0, n);
                 recordedFrames += n / frameSize;
                 soundFrames += n / frameSize;
                 silentFrames = 0;
                 activelyRecording = true;
             } else {
                 if (activelyRecording) {
-                    chunk.write(currentBuffer, 0, n);
+                    chunk.write(frameForOutput, 0, n);
                     recordedFrames += n / frameSize;
                 }
                 silentFrames += n / frameSize;
