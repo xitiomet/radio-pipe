@@ -827,9 +827,11 @@ public class StreamRecorder {
 
                     silentFrames += padFramesPerTick;
                     if (silentFrames >= framesForSilence && chunk.size() > 0) {
-                        log("SILENCE", ANSI_YELLOW,
+                        if (canWriteRecordings()) {
+                            log("SILENCE", ANSI_YELLOW,
                                 String.format("Silence reached after %.1f s, closing clip.",
-                                        recordedFrames / frameRate));
+                                    recordedFrames / frameRate));
+                        }
                         publishEvent("silenceDetected");
                         byte[] clipAudio = chunk.toByteArray();
                         double soundSeconds = soundFrames / frameRate;
@@ -844,9 +846,11 @@ public class StreamRecorder {
                                 writeChunkToPipeWav(pipeSessions, clipAudio, processingFormat, clipOutputFormat);
                             }
                         } else {
-                            log("RECORD", ANSI_YELLOW,
-                                    String.format("Discarding clip with only %.1f s of sound.",
-                                            soundSeconds));
+                            if (canWriteRecordings()) {
+                                log("RECORD", ANSI_YELLOW,
+                                        String.format("Discarding clip with only %.1f s of sound.",
+                                                soundSeconds));
+                            }
                         }
                         chunk.reset();
                         activelyRecording = false;
@@ -1076,8 +1080,10 @@ public class StreamRecorder {
             if (gateAllowsAudio) {
                 if (chunk.size() == 0) {
                     chunkStartTime = System.currentTimeMillis();
-                    log("RECORD", ANSI_GREEN,
-                            "Audio detected, starting clip for stream " + streamLabel + ".");
+                    if (canWriteRecordings()) {
+                        log("RECORD", ANSI_GREEN,
+                                "Audio detected, starting clip for stream " + streamLabel + ".");
+                    }
                     publishEvent("audioDetected");
                 }
                 chunk.write(currentBuffer, 0, n);
@@ -1092,9 +1098,11 @@ public class StreamRecorder {
                 }
                 silentFrames += n / frameSize;
                 if (silentFrames >= framesForSilence && chunk.size() > 0) {
+                    if (canWriteRecordings()) {
                     log("SILENCE", ANSI_YELLOW,
-                            String.format("Silence reached after %.1f s, closing clip.",
-                                    recordedFrames / frameRate));
+                        String.format("Silence reached after %.1f s, closing clip.",
+                            recordedFrames / frameRate));
+                    }
                     publishEvent("silenceDetected");
                     byte[] clipAudio = chunk.toByteArray();
                     double soundSeconds = soundFrames / frameRate;
@@ -1109,9 +1117,11 @@ public class StreamRecorder {
                             writeChunkToPipeWav(pipeSessions, clipAudio, processingFormat, clipOutputFormat);
                         }
                     } else {
-                        log("RECORD", ANSI_YELLOW,
-                                String.format("Discarding clip with only %.1f s of sound.",
-                                        soundSeconds));
+                        if (canWriteRecordings()) {
+                            log("RECORD", ANSI_YELLOW,
+                                    String.format("Discarding clip with only %.1f s of sound.",
+                                            soundSeconds));
+                        }
                     }
                     chunk.reset();
                     activelyRecording = false;
@@ -1135,9 +1145,11 @@ public class StreamRecorder {
                     writeChunkToPipeWav(pipeSessions, clipAudio, processingFormat, clipOutputFormat);
                 }
             } else {
-                log("RECORD", ANSI_YELLOW,
-                        String.format("Discarding clip with only %.1f s of sound.",
-                                soundSeconds));
+                if (canWriteRecordings()) {
+                    log("RECORD", ANSI_YELLOW,
+                            String.format("Discarding clip with only %.1f s of sound.",
+                                    soundSeconds));
+                }
             }
             chunk.reset();
         }
