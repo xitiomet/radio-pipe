@@ -3493,6 +3493,15 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		throw new RuntimeException('RTL bandwidth must be between 1 and 384000.');
 	}
 
+	$resampleRateRaw = trim((string)($input['resampleRate'] ?? ''));
+	$resampleRate = 0;
+	if ($resampleRateRaw !== '') {
+		$resampleRate = (int)$resampleRateRaw;
+		if ($resampleRate <= 0 || $resampleRate > 384000) {
+			throw new RuntimeException('RTL resample rate must be between 1 and 384000.');
+		}
+	}
+
 	$sampleRate = $rtlBandwidth;
 
 	$squelch = trim((string)($input['squelch'] ?? '500'));
@@ -3574,6 +3583,11 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		}
 	}
 
+	$inputDejitter = trim((string)($input['inputDejitter'] ?? ''));
+	if ($inputDejitter !== '' && preg_match('/^[0-9]{1,6}$/', $inputDejitter) !== 1) {
+		throw new RuntimeException('radio-pipe input dejitter must be an integer milliseconds value.');
+	}
+
 	$autoGainEnabled = parse_boolean_flag($input['autoGain'] ?? ($input['radioPipeAutoGain'] ?? '0'), false);
 	$pipeOutputEnabled = parse_boolean_flag($input['pipeOutputEnabled'] ?? ($input['enablePipeOutput'] ?? '1'), false);
 	$pipeOutputs = normalize_pipe_output_entries($input['pipeOutputs'] ?? ($input['pipeOutputEntries'] ?? ($input['pipeOutput'] ?? array())));
@@ -3610,8 +3624,19 @@ function normalize_config(array $input, string $defaultOutputDir): array
 	$outputSelection = normalize_output_selection($input);
 	$recordEnabled = (bool)($outputSelection['recordEnabled'] ?? false);
 	$streamEnabled = (bool)($outputSelection['streamEnabled'] ?? false);
-	if (!$recordEnabled && !$streamEnabled) {
-		throw new RuntimeException('Enable at least one output: Record or Stream.');
+	
+	// Check if pipe outputs are configured
+	$pipeOutputPresetIds = isset($input['pipeOutputPresetIds']) && is_array($input['pipeOutputPresetIds'])
+		? $input['pipeOutputPresetIds']
+		: array();
+	$hasPipeOutputPresets = count($pipeOutputPresetIds) > 0;
+	$hasPipeOutputEntries = count($pipeOutputs) > 0;
+	$hasPipeOutputsConfigured = $hasPipeOutputPresets || $hasPipeOutputEntries;
+	
+	// If pipe outputs are configured, allow both record and stream to be disabled
+	// Otherwise, require at least one output to be enabled
+	if (!$recordEnabled && !$streamEnabled && !$hasPipeOutputsConfigured) {
+		throw new RuntimeException('Enable at least one output: Record, Stream, or Pipe Outputs.');
 	}
 	$outputMode = (string)($outputSelection['outputMode'] ?? derive_output_mode_label($recordEnabled, $streamEnabled));
 
@@ -3782,6 +3807,7 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'frequency' => $frequency,
 		'mode' => $mode,
 		'rtlBandwidth' => $rtlBandwidth,
+		'resampleRate' => $resampleRate,
 		'sampleRate' => $sampleRate,
 		'squelch' => (int)$squelch,
 		'dcs' => $dcsCode,
@@ -3790,6 +3816,7 @@ function normalize_config(array $input, string $defaultOutputDir): array
 		'biasT' => $biasTEnabled ? 1 : 0,
 		'threshold' => $thresholdValue,
 		'postGain' => $postGain,
+		'inputDejitter' => $inputDejitter,
 		'autoGain' => $autoGainEnabled ? 1 : 0,
 		'pipeOutputEnabled' => $pipeOutputEnabled ? 1 : 0,
 		'pipeOutputs' => $pipeOutputs,
@@ -4179,11 +4206,15 @@ function build_rms_stdout_pad_conditioner_command(int $sampleRate, string $dcsCo
 
 function build_stream_input_conditioner_command(array $config): string
 {
-	$sampleRate = max(1, (int)$config['rtlBandwidth']);
+	$effectiveRate = ((int)($config['resampleRate'] ?? 0)) > 0 ? (int)$config['resampleRate'] : (int)$config['rtlBandwidth'];
+	$sampleRate = max(1, $effectiveRate);
 	$dcsCode = trim((string)($config['dcs'] ?? ''));
 	$ctcssTone = trim((string)($config['ctcss'] ?? ''));
 	$stdoutPadDelayMs = get_rms_stdout_pad_delay_ms();
-	$inputDejitterMs = get_rms_input_dejitter_ms();
+	$inputDejitterMs = max(0, (int)($config['inputDejitter'] ?? 0));
+	if ($inputDejitterMs <= 0) {
+		$inputDejitterMs = get_rms_input_dejitter_ms();
+	}
 	$streamSampleRate = max(0, (int)($config['streamSampleRate'] ?? 0));
 	$apiWebsocketOptions = get_radio_pipe_api_websocket_options($config);
 	$apiWebsocketAddress = (string)($apiWebsocketOptions['bindAddress'] ?? '');
@@ -4196,6 +4227,12 @@ function build_stream_input_conditioner_command(array $config): string
 
 function build_recording_recorder_command(array $config, bool $enableStdout = false): string
 {
+	$recordEnabled = config_records_enabled($config);
+	$inputDejitterMs = max(0, (int)($config['inputDejitter'] ?? 0));
+	if ($inputDejitterMs <= 0 && $enableStdout) {
+		$inputDejitterMs = get_rms_input_dejitter_ms();
+	}
+
 	$recorderCommand = array(
 		'radio-pipe',
 		'--stdin',
@@ -4208,34 +4245,35 @@ function build_recording_recorder_command(array $config, bool $enableStdout = fa
 		$recorderCommand[] = $apiWebsocketAddress;
 	}
 
-	if ($enableStdout) {
-		$inputDejitterMs = get_rms_input_dejitter_ms();
-		if ($inputDejitterMs > 0 && radio_pipe_supports_input_dejitter()) {
-			$recorderCommand[] = '--input-dejitter';
-			$recorderCommand[] = (string)$inputDejitterMs;
-		}
+	if ($inputDejitterMs > 0 && radio_pipe_supports_input_dejitter()) {
+		$recorderCommand[] = '--input-dejitter';
+		$recorderCommand[] = (string)$inputDejitterMs;
 	}
 
+	$effectiveStdinRate = ((int)($config['resampleRate'] ?? 0)) > 0 ? (int)$config['resampleRate'] : (int)$config['rtlBandwidth'];
 	array_push(
 		$recorderCommand,
 		'--stdin-raw',
 		'--stdin-rate',
-		(string)$config['rtlBandwidth'],
+		(string)$effectiveStdinRate,
 		'--stdin-channels',
 		'1',
 		'--stdin-bits',
 		'16',
 		'-r',
-		(string)$config['rtlBandwidth'],
+		(string)$effectiveStdinRate,
 		'-t',
 		(string)$config['threshold'],
 		'-s',
 		(string)$config['silence'],
-		'-o',
-		(string)$config['outputDir'],
 		'-n',
 		build_output_display_name($config)
 	);
+
+	if ($recordEnabled) {
+		$recorderCommand[] = '-o';
+		$recorderCommand[] = (string)$config['outputDir'];
+	}
 
 	$dcsCode = trim((string)($config['dcs'] ?? ''));
 	if ($dcsCode !== '') {
@@ -4647,7 +4685,7 @@ function build_pipeline_command(array $config): string
 		'-s',
 		(string)$config['rtlBandwidth'],
 		'-r',
-		(string)$config['rtlBandwidth'],
+		(string)(((int)($config['resampleRate'] ?? 0)) > 0 ? $config['resampleRate'] : $config['rtlBandwidth']),
 		'-E',
 		'dc',
 		'-E',
@@ -4746,7 +4784,9 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 		$recordEnabled
 		&& in_array(strtolower((string)($config['afterRecordAction'] ?? 'none')), array('upload', 'upload_delete'), true);
 	$recorderSupportsStdoutPad = $recorderAvailable && radio_pipe_supports_stdout_padding();
+	$configuredInputDejitterMs = max(0, (int)($config['inputDejitter'] ?? 0));
 	$rmsInputDejitterMs = $streamEnabled ? get_rms_input_dejitter_ms() : 0;
+	$effectiveInputDejitterMs = $configuredInputDejitterMs > 0 ? $configuredInputDejitterMs : $rmsInputDejitterMs;
 	$recorderSupportsInputDejitter = $recorderAvailable && radio_pipe_supports_input_dejitter();
 	$recorderSupportsApiWebsocket = $recorderAvailable && radio_pipe_supports_api_websocket();
 
@@ -4788,7 +4828,10 @@ function start_instance(array $config, string $logDir, ?array $attemptDelaysUs =
 		return array('ok' => false, 'error' => 'Stream output requires radio-pipe support for --stdout-raw and --stdout-pad. Upgrade radio-pipe and retry.');
 	}
 
-	if ($streamEnabled && $rmsInputDejitterMs > 0 && !$recorderSupportsInputDejitter) {
+	if ($effectiveInputDejitterMs > 0 && !$recorderSupportsInputDejitter) {
+		if ($configuredInputDejitterMs > 0) {
+			return array('ok' => false, 'error' => 'radio-pipe input dejitter is configured for this device, but this radio-pipe build does not support --input-dejitter. Upgrade radio-pipe or set Input Dejitter to 0.');
+		}
 		return array('ok' => false, 'error' => 'Stream output is configured with RMS_INPUT_DEJITTER_MS, but this radio-pipe build does not support --input-dejitter. Upgrade radio-pipe or set RMS_INPUT_DEJITTER_MS to 0.');
 	}
 
@@ -8894,6 +8937,9 @@ function deriveClientOutputModeLabel(recordEnabled, streamEnabled)
 function getClientOutputSelection(config)
 {
 	var source = (config && typeof config === 'object') ? config : {};
+	var hasPipeOutputPresets = normalizePipeOutputPresetIdList(source.pipeOutputPresetIds).length > 0;
+	var hasPipeOutputEntries = normalizeClientPipeOutputEntries(source.pipeOutputs).length > 0;
+	var hasPipeOutputsConfigured = hasPipeOutputPresets || hasPipeOutputEntries;
 	var hasRecordEnabled = Object.prototype.hasOwnProperty.call(source, 'recordEnabled');
 	var hasStreamEnabled = Object.prototype.hasOwnProperty.call(source, 'streamEnabled');
 	var recordEnabled = true;
@@ -8921,7 +8967,7 @@ function getClientOutputSelection(config)
 		}
 	}
 
-	if (!recordEnabled && !streamEnabled) {
+	if (!recordEnabled && !streamEnabled && !hasPipeOutputsConfigured) {
 		recordEnabled = true;
 	}
 
@@ -9114,8 +9160,10 @@ function getDefaultConfig(deviceId)
 		frequency: '146.520M',
 		mode: 'fm',
 		rtlBandwidth: '12000',
+		resampleRate: '',
 		squelch: '500',
 		gain: 'auto',
+		inputDejitter: '',
 		dcs: '',
 		ctcss: '',
 		biasT: '0',
@@ -9431,8 +9479,20 @@ function syncOutputModeFields(card)
 	}
 	var isStream = streamCheckbox.checked;
 	var isRecord = recordCheckbox.checked;
-	// enforce at least one enabled
-	if (!isRecord && !isStream) {
+	
+	// Check if pipe outputs are configured
+	var hasPipeOutputPresets = (function() {
+		var toggles = card.querySelectorAll('.field-pipe-output-preset-toggle');
+		for (var i = 0; i < toggles.length; i++) {
+			if (toggles[i].checked) {
+				return true;
+			}
+		}
+		return false;
+	})();
+	
+	// enforce at least one enabled, unless pipe outputs are configured
+	if (!isRecord && !isStream && !hasPipeOutputPresets) {
 		recordCheckbox.checked = true;
 		isRecord = true;
 	}
@@ -9665,7 +9725,9 @@ function buildPipelineStagePreviewLines(config)
 	}
 	rtlLine += ' -M ' + String(source.mode || 'fm');
 	var rtlBandwidth = String(source.rtlBandwidth || '12000');
-	rtlLine += ' -s ' + rtlBandwidth + ' -r ' + rtlBandwidth;
+	var resampleRate = String(source.resampleRate || '').trim();
+	var effectiveStdinRate = resampleRate !== '' ? resampleRate : rtlBandwidth;
+	rtlLine += ' -s ' + rtlBandwidth + ' -r ' + effectiveStdinRate;
 	var squelch = String(source.squelch || '').trim();
 	if (squelch !== '') {
 		rtlLine += ' -l ' + squelch;
@@ -9681,11 +9743,16 @@ function buildPipelineStagePreviewLines(config)
 	var dcsCode = normalizeClientDcsCode(source.dcs);
 	var ctcssTone = normalizeClientCtcssTone(source.ctcss);
 	var postGain = normalizeClientPostGainValue(source.postGain);
+	var inputDejitter = String(source.inputDejitter || '').trim();
+	var effectiveInputDejitter = inputDejitter;
+	if (effectiveInputDejitter === '' && rmsInputDejitterMs > 0) {
+		effectiveInputDejitter = String(rmsInputDejitterMs);
+	}
 	var autoGainEnabled = parseClientBooleanFlag(source.autoGain, false);
 	if (outputSelection.streamEnabled && outputSelection.recordEnabled) {
-		var recorderBothLine = 'radio-pipe --stdin';
-		if (rmsInputDejitterMs > 0) {
-			recorderBothLine += ' --input-dejitter ' + String(rmsInputDejitterMs);
+		var recorderBothLine = 'radio-pipe --stdin --stdin-rate ' + effectiveStdinRate;
+		if (effectiveInputDejitter !== '') {
+			recorderBothLine += ' --input-dejitter ' + effectiveInputDejitter;
 		}
 		recorderBothLine += ' --stdout-pad';
 		recorderBothLine += ' --stdout-rate ' + streamSampleRate;
@@ -9706,9 +9773,9 @@ function buildPipelineStagePreviewLines(config)
 		recorderBothLine = appendPipeOutputPreviewArgs(recorderBothLine, source);
 		lines.push(recorderBothLine);
 	} else if (outputSelection.streamEnabled) {
-		var conditionerLine = 'radio-pipe --stdin';
-		if (rmsInputDejitterMs > 0) {
-			conditionerLine += ' --input-dejitter ' + String(rmsInputDejitterMs);
+		var conditionerLine = 'radio-pipe --stdin --stdin-rate ' + effectiveStdinRate;
+		if (effectiveInputDejitter !== '') {
+			conditionerLine += ' --input-dejitter ' + effectiveInputDejitter;
 		}
 		conditionerLine += ' --stdout-pad';
 		conditionerLine += ' --stdout-rate ' + streamSampleRate;
@@ -9727,7 +9794,10 @@ function buildPipelineStagePreviewLines(config)
 		conditionerLine = appendPipeOutputPreviewArgs(conditionerLine, source);
 		lines.push(conditionerLine);
 	} else {
-		var recorderLine = 'radio-pipe --stdin';
+		var recorderLine = 'radio-pipe --stdin --stdin-rate ' + effectiveStdinRate;
+		if (inputDejitter !== '') {
+			recorderLine += ' --input-dejitter ' + inputDejitter;
+		}
 		recorderLine += ' -t ' + String(source.threshold || '-40');
 		recorderLine += ' -s ' + String(source.silence || '2');
 		if (dcsCode !== '') {
@@ -11257,8 +11327,17 @@ function renderDeviceList()
 		var isStreamMode = outputSelection.streamEnabled;
 		var isRecordMode = outputSelection.recordEnabled;
 		var isBothMode = isStreamMode && isRecordMode;
+		var hasPipeMode = resolvePipeOutputsForConfig(config).length > 0;
 		var stateClass = isRunning ? 'running' : 'stopped';
-		var stateLabel = isRunning ? (isBothMode ? 'Rec+Stream' : (isStreamMode ? 'Streaming' : 'Recording')) : 'Stopped';
+		var activeOutputLabel = isBothMode
+			? 'Rec+Stream'
+			: (isStreamMode ? 'Streaming' : (isRecordMode ? 'Recording' : 'No Output'));
+		if (hasPipeMode) {
+			activeOutputLabel = activeOutputLabel === 'No Output'
+				? 'PIPE'
+				: (activeOutputLabel + '+PIPE');
+		}
+		var stateLabel = isRunning ? activeOutputLabel : 'Stopped';
 		var rxIndicator = getRxIndicator(deviceId, isRunning, config);
 		var rmsDbIndicator = getRmsDbIndicator(deviceId, isRunning);
 		var rmsDbPercentText = isFinite(rmsDbIndicator.percent) ? String(rmsDbIndicator.percent.toFixed(1)) : '0.0';
@@ -11395,9 +11474,24 @@ function renderDeviceList()
 							'<option value="170000">170 kHz</option>' +
 						'</select></div>' +
 					'</div>' +
+					'<div class="form-row single">' +
+						'<div><label>RTL Resample</label><select class="field-rtl-resample">' +
+							'<option value="">Off (use bandwidth)</option>' +
+							'<option value="3000">3 kHz</option>' +
+							'<option value="6000">6 kHz</option>' +
+							'<option value="12000">12 kHz</option>' +
+							'<option value="24000">24 kHz</option>' +
+							'<option value="48000">48 kHz</option>' +
+							'<option value="96000">96 kHz</option>' +
+							'<option value="170000">170 kHz</option>' +
+						'</select></div>' +
+					'</div>' +
 					'<div class="form-row">' +
 						'<div><label>Squelch</label><input type="number" step="1" inputmode="numeric" class="field-squelch" value="' + escapeHtml(String(config.squelch || '500')) + '" placeholder="non-zero integer" title="Must be a non-zero integer"></div>' +
 						'<div><label>RTL Gain</label><input type="text" class="field-gain" value="' + escapeHtml(String(config.gain || '')) + '" placeholder="auto or number"></div>' +
+					'</div>' +
+					'<div class="form-row single">' +
+						'<div><label>radio-pipe Input Dejitter (ms)</label><input type="number" min="0" step="1" class="field-input-dejitter" value="' + escapeHtml(String(config.inputDejitter || '')) + '" placeholder="Optional: 0 to disable"></div>' +
 					'</div>' +
 					'<div class="form-row single">' +
 						'<div><label>DCS Gate</label><select class="field-dcs">' + buildDcsOptions(String(config.dcs || '')) + '</select></div>' +
@@ -11694,6 +11788,7 @@ function readCardConfig(card)
 		frequency: card.querySelector('.field-frequency').value.trim(),
 		mode: card.querySelector('.field-mode').value.trim(),
 		rtlBandwidth: card.querySelector('.field-rtl-bandwidth').value.trim(),
+		resampleRate: card.querySelector('.field-rtl-resample') ? card.querySelector('.field-rtl-resample').value.trim() : '',
 		recordEnabled: !!(card.querySelector('.field-record-enabled') && card.querySelector('.field-record-enabled').checked),
 		streamEnabled: !!(card.querySelector('.field-stream-enabled') && card.querySelector('.field-stream-enabled').checked),
 		outputMode: deriveClientOutputModeLabel(
@@ -11702,6 +11797,7 @@ function readCardConfig(card)
 		),
 		squelch: normalizeClientSquelchValue(card.querySelector('.field-squelch').value),
 		gain: card.querySelector('.field-gain').value.trim(),
+		inputDejitter: card.querySelector('.field-input-dejitter') ? card.querySelector('.field-input-dejitter').value.trim() : '',
 		postGain: normalizeClientPostGainValue(card.querySelector('.field-post-gain').value),
 		autoGain: !!(card.querySelector('.field-auto-gain') && card.querySelector('.field-auto-gain').checked) ? '1' : '0',
 		pipeOutputEnabled: '1',
@@ -11922,6 +12018,7 @@ function bindDeviceCard(card)
 	var deviceId = normalizeClientDeviceId(String(card.getAttribute('data-device-id') || ''));
 	var modeSelect = card.querySelector('.field-mode');
 	var bandwidthSelect = card.querySelector('.field-rtl-bandwidth');
+	var resampleSelect = card.querySelector('.field-rtl-resample');
 	var biasTSelect = card.querySelector('.field-bias-t');
 	var dcsSelect = card.querySelector('.field-dcs');
 	var ctcssSelect = card.querySelector('.field-ctcss');
@@ -11941,6 +12038,9 @@ function bindDeviceCard(card)
 	var selectedPresetIds = normalizePipeOutputPresetIdList(storedConfig.pipeOutputPresetIds);
 	modeSelect.value = storedConfig.mode || 'fm';
 	bandwidthSelect.value = String(storedConfig.rtlBandwidth || '12000');
+	if (resampleSelect) {
+		resampleSelect.value = String(storedConfig.resampleRate || '');
+	}
 	if (postGainInput) {
 		postGainInput.value = normalizeClientPostGainValue(storedConfig.postGain);
 	}
@@ -12011,6 +12111,8 @@ function bindDeviceCard(card)
 		pipeOutputPresetsList.addEventListener('change', function (event) {
 			var target = event.target;
 			if (target && target.classList && target.classList.contains('field-pipe-output-preset-toggle')) {
+				// Sync record/stream validation when pipe outputs change
+				syncOutputModeFields(card);
 				persistCardConfig(card);
 			}
 		});
