@@ -46,6 +46,7 @@ public class StreamRecorder {
     private static final long STDOUT_READ_POLL_MILLIS = 20L;
     private static final long DEFAULT_STDOUT_PAD_DELAY_MILLIS = 500L;
     private static final long DEFAULT_INPUT_DEJITTER_MILLIS = 250L;
+    private static final long PIPE_RESTART_BACKOFF_MILLIS = 1000L;
     private static final double AUTO_GAIN_TARGET_DB = -12.0;
     private static final double AUTO_GAIN_MAX_DB = 30.0;
     private final URL streamUrl;
@@ -82,6 +83,15 @@ public class StreamRecorder {
     private volatile String deviceOutputSelector;
     private volatile boolean deviceOutputConversionWarned;
     private volatile boolean deviceConfigLogged;
+    private final List<String> pipeOutputCommands;
+    private volatile boolean pipeRawMode;
+    private volatile AudioFormat pipeRawFormat;
+    private volatile boolean pipeRawConversionWarned;
+    private volatile boolean pipeConfigLogged;
+    private volatile String pipeInputCommand;
+    private volatile boolean pipeInputRawMode;
+    private volatile AudioFormat pipeInputRawFormat;
+    private volatile Process pipeInputProcess;
     private volatile double outputGainDb;
     private volatile boolean autoGainEnabled;
     private volatile ApiWebSocketServer apiWebSocketServer;
@@ -218,6 +228,15 @@ public class StreamRecorder {
         this.deviceOutputSelector = null;
         this.deviceOutputConversionWarned = false;
         this.deviceConfigLogged = false;
+        this.pipeOutputCommands = new ArrayList<>();
+        this.pipeRawMode = false;
+        this.pipeRawFormat = null;
+        this.pipeRawConversionWarned = false;
+        this.pipeConfigLogged = false;
+        this.pipeInputCommand = null;
+        this.pipeInputRawMode = false;
+        this.pipeInputRawFormat = null;
+        this.pipeInputProcess = null;
         this.outputGainDb = 0.0;
         this.autoGainEnabled = false;
         this.apiWebSocketServer = null;
@@ -225,6 +244,10 @@ public class StreamRecorder {
 
     public void stop() {
         running = false;
+        Process activePipeInputProcess = this.pipeInputProcess;
+        if (activePipeInputProcess != null) {
+            activePipeInputProcess.destroy();
+        }
         log("STOP", ANSI_YELLOW, "Shutdown requested, finishing current write before exit.");
     }
 
@@ -316,6 +339,51 @@ public class StreamRecorder {
         this.deviceConfigLogged = false;
     }
 
+    public void setPipeOutputs(String[] pipeCommands) {
+        this.pipeOutputCommands.clear();
+        if (pipeCommands != null) {
+            for (String pipeCommand : pipeCommands) {
+                if (!isBlank(pipeCommand)) {
+                    this.pipeOutputCommands.add(pipeCommand.trim());
+                }
+            }
+        }
+        this.pipeConfigLogged = false;
+    }
+
+    public void setPipeRawOutput(boolean rawMode, AudioFormat rawFormat) {
+        if (!rawMode) {
+            this.pipeRawMode = false;
+            this.pipeRawFormat = null;
+            this.pipeRawConversionWarned = false;
+            this.pipeConfigLogged = false;
+            return;
+        }
+        if (rawFormat == null) {
+            throw new IllegalArgumentException("pipe raw mode requires a format");
+        }
+        this.pipeRawMode = true;
+        this.pipeRawFormat = rawFormat;
+        this.pipeRawConversionWarned = false;
+        this.pipeConfigLogged = false;
+    }
+
+    public void setPipeInput(String command, boolean rawMode, AudioFormat rawFormat) {
+        if (isBlank(command)) {
+            this.pipeInputCommand = null;
+            this.pipeInputRawMode = false;
+            this.pipeInputRawFormat = null;
+            return;
+        }
+        if (rawMode && rawFormat == null) {
+            throw new IllegalArgumentException("pipe-input raw mode requires a format");
+        }
+
+        this.pipeInputCommand = command.trim();
+        this.pipeInputRawMode = rawMode;
+        this.pipeInputRawFormat = rawMode ? rawFormat : null;
+    }
+
     public void setGainControl(double gainDb, boolean autoGainEnabled) {
         if (!Double.isFinite(gainDb)) {
             throw new IllegalArgumentException("gain must be a finite numeric value in dB");
@@ -333,6 +401,10 @@ public class StreamRecorder {
 
     public void run() throws Exception {
         logHookConfiguration();
+        if (!isBlank(this.pipeInputCommand)) {
+            runFromPipeInput();
+            return;
+        }
         if (stdinMode) {
             runFromStdin();
             return;
@@ -396,6 +468,77 @@ public class StreamRecorder {
         }
     }
 
+    private void runFromPipeInput() throws Exception {
+        String command = this.pipeInputCommand;
+        if (isBlank(command)) {
+            throw new IllegalStateException("pipe-input command is not configured");
+        }
+
+        while (running) {
+            Process process = null;
+            try {
+                log("CONNECT", ANSI_BLUE, "Reading audio from pipe input command: " + command);
+                ProcessBuilder pb = new ProcessBuilder(buildShellCommand(command));
+                process = pb.start();
+                this.pipeInputProcess = process;
+                startPipeInputStderrLogger(command, process.getErrorStream());
+
+                log("STREAM", ANSI_CYAN,
+                        "Connected: name=" + streamLabel
+                                + ", type=pipe-input, bitrate=unknown");
+                if (this.pipeInputRawMode && this.pipeInputRawFormat != null) {
+                    log("FORMAT", ANSI_CYAN,
+                            "Raw pipe input format: " + describeAudioFormat(this.pipeInputRawFormat));
+                }
+
+                try (InputStream raw = new BufferedInputStream(process.getInputStream())) {
+                    if (this.pipeInputRawMode && this.pipeInputRawFormat != null) {
+                        processRawInput(raw, this.pipeInputRawFormat);
+                    } else {
+                        processInput(raw);
+                    }
+                }
+            } catch (Exception e) {
+                if (!running) {
+                    break;
+                }
+                logError("Pipe-input command error: " + e.getMessage());
+                e.printStackTrace(System.err);
+            } finally {
+                this.pipeInputProcess = null;
+                if (process != null) {
+                    process.destroy();
+                    try {
+                        process.waitFor(1000L, TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException interruptedException) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+
+            if (running) {
+                log("RETRY", ANSI_YELLOW,
+                        "Pipe-input command ended, restarting in " + PIPE_RESTART_BACKOFF_MILLIS + " ms...");
+                Thread.sleep(PIPE_RESTART_BACKOFF_MILLIS);
+            }
+        }
+    }
+
+    private void startPipeInputStderrLogger(String command, InputStream stderrStream) {
+        Thread stderrThread = new Thread(() -> {
+            try (BufferedReader errorReader = new BufferedReader(new InputStreamReader(stderrStream))) {
+                String line;
+                while ((line = errorReader.readLine()) != null) {
+                    log("PIPE-IN", ANSI_BLUE, "[" + command + "] " + line);
+                }
+            } catch (IOException ignored) {
+                // Stream closed.
+            }
+        }, "pipe-input-stderr-" + Math.abs(command.hashCode()));
+        stderrThread.setDaemon(true);
+        stderrThread.start();
+    }
+
     private void processInput(InputStream raw) throws Exception {
         try (AudioInputStream audio = AudioSystem.getAudioInputStream(raw)) {
             processInput(audio);
@@ -404,6 +547,12 @@ public class StreamRecorder {
 
     private void processRawInput(InputStream raw) throws Exception {
         try (AudioInputStream audio = new AudioInputStream(raw, this.stdinRawFormat, AudioSystem.NOT_SPECIFIED)) {
+            processInput(audio);
+        }
+    }
+
+    private void processRawInput(InputStream raw, AudioFormat rawFormat) throws Exception {
+        try (AudioInputStream audio = new AudioInputStream(raw, rawFormat, AudioSystem.NOT_SPECIFIED)) {
             processInput(audio);
         }
     }
@@ -456,6 +605,7 @@ public class StreamRecorder {
             logCtcssConfiguration();
             logStdoutConfiguration(activeOutputFormat);
             logDeviceConfiguration(activeOutputFormat);
+            logPipeConfiguration(activeOutputFormat);
             logGainConfiguration();
             processStream(din, decodedFormat, activeOutputFormat);
         }
@@ -535,6 +685,7 @@ public class StreamRecorder {
         if (this.deviceOutputEnabled) {
             deviceOutputSession = openDeviceOutputSession(processingFormat, clipOutputFormat);
         }
+        List<PipeOutputSession> pipeSessions = openPipeOutputSessions();
 
         BlockingQueue<StreamReadResult> readQueue = new LinkedBlockingQueue<>();
         Thread readerThread = new Thread(() -> {
@@ -643,6 +794,9 @@ public class StreamRecorder {
                             }
                             if (this.stdoutEnabled && !this.stdoutRawMode) {
                                 writeChunkToStdoutWav(clipAudio, processingFormat, clipOutputFormat);
+                            }
+                            if (!pipeSessions.isEmpty() && !this.pipeRawMode) {
+                                writeChunkToPipeWav(pipeSessions, clipAudio, processingFormat, clipOutputFormat);
                             }
                         } else {
                             log("RECORD", ANSI_YELLOW,
@@ -852,6 +1006,9 @@ public class StreamRecorder {
                     writeStdoutRaw(currentBuffer, n, processingFormat);
                 }
             }
+            if (!pipeSessions.isEmpty() && this.pipeRawMode && includeFrameInClip) {
+                writePipeRaw(pipeSessions, currentBuffer, n, processingFormat);
+            }
             if (deviceOutputSession != null && includeFrameInClip) {
                 writeDeviceOutput(deviceOutputSession, currentBuffer, n, processingFormat);
             }
@@ -888,6 +1045,9 @@ public class StreamRecorder {
                         if (this.stdoutEnabled && !this.stdoutRawMode) {
                             writeChunkToStdoutWav(clipAudio, processingFormat, clipOutputFormat);
                         }
+                        if (!pipeSessions.isEmpty() && !this.pipeRawMode) {
+                            writeChunkToPipeWav(pipeSessions, clipAudio, processingFormat, clipOutputFormat);
+                        }
                     } else {
                         log("RECORD", ANSI_YELLOW,
                                 String.format("Discarding clip with only %.1f s of sound.",
@@ -911,6 +1071,9 @@ public class StreamRecorder {
                 if (this.stdoutEnabled && !this.stdoutRawMode) {
                     writeChunkToStdoutWav(clipAudio, processingFormat, clipOutputFormat);
                 }
+                if (!pipeSessions.isEmpty() && !this.pipeRawMode) {
+                    writeChunkToPipeWav(pipeSessions, clipAudio, processingFormat, clipOutputFormat);
+                }
             } else {
                 log("RECORD", ANSI_YELLOW,
                         String.format("Discarding clip with only %.1f s of sound.",
@@ -920,6 +1083,7 @@ public class StreamRecorder {
         }
         } finally {
             closeDeviceOutputSession(deviceOutputSession);
+            closePipeOutputSessions(pipeSessions);
         }
     }
 
@@ -989,6 +1153,26 @@ public class StreamRecorder {
                 "hardware audio output enabled: selector='" + selector
                         + "', preferred format " + describeAudioFormat(activeFormat));
         this.deviceConfigLogged = true;
+    }
+
+    private void logPipeConfiguration(AudioFormat activeFormat) {
+        if (this.pipeOutputCommands.isEmpty() || this.pipeConfigLogged) {
+            return;
+        }
+
+        for (String command : this.pipeOutputCommands) {
+            log("PIPE", ANSI_CYAN,
+                    "pipe output enabled: " + command);
+        }
+        if (this.pipeRawMode) {
+            AudioFormat targetFormat = (this.pipeRawFormat == null) ? activeFormat : this.pipeRawFormat;
+            log("PIPE", ANSI_CYAN,
+                "pipe mode: raw PCM stream: " + describeAudioFormat(targetFormat));
+        } else {
+            log("PIPE", ANSI_CYAN,
+                    "pipe mode: WAV clip stream (one WAV payload per closed clip).");
+        }
+        this.pipeConfigLogged = true;
     }
 
     private void logGainConfiguration() {
@@ -1079,7 +1263,7 @@ public class StreamRecorder {
             return;
         }
 
-        AudioFormat targetFormat = (this.stdoutRawFormat == null) ? sourceFormat : this.stdoutRawFormat;
+        AudioFormat targetFormat = (this.pipeRawFormat == null) ? sourceFormat : this.pipeRawFormat;
 
         if (audioFormatsEquivalent(sourceFormat, targetFormat)) {
             synchronized (System.out) {
@@ -1129,6 +1313,256 @@ public class StreamRecorder {
                 System.out.flush();
             }
         }
+    }
+
+    private List<PipeOutputSession> openPipeOutputSessions() {
+        List<PipeOutputSession> sessions = new ArrayList<>();
+        for (String command : this.pipeOutputCommands) {
+            PipeOutputSession session = new PipeOutputSession(command);
+            if (!restartPipeSession(session, "startup")) {
+                session.nextRestartAttemptAtMillis = System.currentTimeMillis() + PIPE_RESTART_BACKOFF_MILLIS;
+            }
+            sessions.add(session);
+        }
+        return sessions;
+    }
+
+    private PipeOutputSession openPipeOutputSession(String command) throws IOException {
+        ProcessBuilder pb = new ProcessBuilder(buildShellCommand(command));
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+
+        Thread outputDrainer = new Thread(() -> {
+            try (BufferedReader outputReader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = outputReader.readLine()) != null) {
+                    log("PIPE", ANSI_BLUE, "[" + command + "] " + line);
+                }
+            } catch (IOException ignored) {
+                // Process stream closed.
+            }
+        }, "pipe-output-" + Math.abs(command.hashCode()));
+        outputDrainer.setDaemon(true);
+        outputDrainer.start();
+
+        PipeOutputSession session = new PipeOutputSession(command);
+        session.process = process;
+        session.stdin = process.getOutputStream();
+        session.broken = false;
+        session.nextRestartAttemptAtMillis = 0L;
+        return session;
+    }
+
+    private void closePipeOutputSessions(List<PipeOutputSession> sessions) {
+        if (sessions == null || sessions.isEmpty()) {
+            return;
+        }
+
+        for (PipeOutputSession session : sessions) {
+            try {
+                if (session.stdin != null) {
+                    session.stdin.close();
+                }
+            } catch (IOException ignored) {
+                // Best effort during shutdown.
+            }
+            try {
+                if (session.process != null && !session.process.waitFor(1500L, TimeUnit.MILLISECONDS)) {
+                    session.process.destroy();
+                }
+            } catch (InterruptedException interruptedException) {
+                Thread.currentThread().interrupt();
+                if (session.process != null) {
+                    session.process.destroy();
+                }
+            }
+            session.process = null;
+            session.stdin = null;
+            session.broken = true;
+        }
+    }
+
+    private void writeChunkToPipeWav(List<PipeOutputSession> sessions,
+                                     byte[] audioData,
+                                     AudioFormat sourceFormat,
+                                     AudioFormat targetFormat) {
+        if (sessions == null || sessions.isEmpty()) {
+            return;
+        }
+
+        final byte[] wavBytes;
+        try {
+            wavBytes = buildWavBytes(audioData, sourceFormat, targetFormat);
+        } catch (Exception conversionException) {
+            logError("Failed to convert clip for pipe output: " + conversionException.getMessage());
+            return;
+        }
+
+        for (PipeOutputSession session : sessions) {
+            writePipeBytes(session, wavBytes, 0, wavBytes.length, "WAV clip");
+        }
+    }
+
+    private void writePipeRaw(List<PipeOutputSession> sessions,
+                              byte[] audioData,
+                              int len,
+                              AudioFormat sourceFormat) {
+        if (sessions == null || sessions.isEmpty() || len <= 0) {
+            return;
+        }
+
+        AudioFormat targetFormat = (this.stdoutRawFormat == null) ? sourceFormat : this.stdoutRawFormat;
+
+        if (audioFormatsEquivalent(sourceFormat, targetFormat)) {
+            for (PipeOutputSession session : sessions) {
+                writePipeBytes(session, audioData, 0, len, "raw PCM");
+            }
+            return;
+        }
+
+        if (!AudioSystem.isConversionSupported(targetFormat, sourceFormat)) {
+            if (!this.pipeRawConversionWarned) {
+                this.pipeRawConversionWarned = true;
+                log("PIPE", ANSI_YELLOW,
+                        "pipe raw conversion unsupported from "
+                                + describeAudioFormat(sourceFormat)
+                                + " to "
+                                + describeAudioFormat(targetFormat)
+                                + "; dropping raw pipe audio.");
+            }
+            return;
+        }
+
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(audioData, 0, len);
+             AudioInputStream source = new AudioInputStream(bais, sourceFormat, len / sourceFormat.getFrameSize());
+             AudioInputStream converted = AudioSystem.getAudioInputStream(targetFormat, source);
+             ByteArrayOutputStream convertedOut = new ByteArrayOutputStream()) {
+            byte[] convertedBuffer = new byte[Math.max(1024, targetFormat.getFrameSize() * 256)];
+            int read;
+            while ((read = converted.read(convertedBuffer)) != -1) {
+                convertedOut.write(convertedBuffer, 0, read);
+            }
+            byte[] convertedBytes = convertedOut.toByteArray();
+            for (PipeOutputSession session : sessions) {
+                writePipeBytes(session, convertedBytes, 0, convertedBytes.length, "raw PCM");
+            }
+        } catch (Exception conversionException) {
+            if (!this.pipeRawConversionWarned) {
+                this.pipeRawConversionWarned = true;
+                log("PIPE", ANSI_YELLOW,
+                        "pipe raw conversion failed (" + conversionException.getMessage() + "); dropping raw pipe audio.");
+            }
+        }
+    }
+
+    private byte[] buildWavBytes(byte[] audioData, AudioFormat sourceFormat, AudioFormat targetFormat)
+            throws IOException, UnsupportedAudioFileException {
+        try (AudioInputStream ais = openClipStream(audioData, sourceFormat, targetFormat);
+             ByteArrayOutputStream output = new ByteArrayOutputStream(Math.max(4096, audioData.length + 64))) {
+            AudioSystem.write(ais, AudioFileFormat.Type.WAVE, output);
+            return output.toByteArray();
+        }
+    }
+
+    private boolean writePipeBytes(PipeOutputSession session,
+                                   byte[] data,
+                                   int off,
+                                   int len,
+                                   String modeDescription) {
+        if (session == null) {
+            return false;
+        }
+        if (!ensurePipeSessionReady(session, modeDescription)) {
+            return false;
+        }
+
+        try {
+            session.stdin.write(data, off, len);
+            session.stdin.flush();
+            return true;
+        } catch (IOException ioe) {
+            log("PIPE", ANSI_YELLOW,
+                    "Pipe command closed (" + modeDescription + "): " + session.command
+                            + " (" + ioe.getMessage() + "), scheduling restart.");
+            markPipeSessionFailed(session);
+            return false;
+        }
+    }
+
+    private boolean ensurePipeSessionReady(PipeOutputSession session, String modeDescription) {
+        if (session == null) {
+            return false;
+        }
+
+        Process process = session.process;
+        if (process != null && !process.isAlive()) {
+            markPipeSessionFailed(session);
+            log("PIPE", ANSI_YELLOW,
+                    "Pipe command exited, scheduling restart (" + modeDescription + "): " + session.command);
+        }
+
+        if (session.process != null && session.stdin != null && !session.broken) {
+            return true;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now < session.nextRestartAttemptAtMillis) {
+            return false;
+        }
+
+        return restartPipeSession(session, modeDescription);
+    }
+
+    private boolean restartPipeSession(PipeOutputSession session, String reason) {
+        if (session == null) {
+            return false;
+        }
+        try {
+            PipeOutputSession restarted = openPipeOutputSession(session.command);
+            session.process = restarted.process;
+            session.stdin = restarted.stdin;
+            session.broken = false;
+            session.nextRestartAttemptAtMillis = 0L;
+            log("PIPE", ANSI_CYAN,
+                    "Pipe command running (" + reason + "): " + session.command);
+            return true;
+        } catch (IOException ioe) {
+            session.process = null;
+            session.stdin = null;
+            session.broken = true;
+            session.nextRestartAttemptAtMillis = System.currentTimeMillis() + PIPE_RESTART_BACKOFF_MILLIS;
+            log("PIPE", ANSI_YELLOW,
+                    "Failed to start pipe command: " + session.command + " (" + ioe.getMessage() + ")");
+            return false;
+        }
+    }
+
+    private void markPipeSessionFailed(PipeOutputSession session) {
+        if (session == null) {
+            return;
+        }
+        session.broken = true;
+        session.nextRestartAttemptAtMillis = System.currentTimeMillis() + PIPE_RESTART_BACKOFF_MILLIS;
+        if (session.stdin != null) {
+            try {
+                session.stdin.close();
+            } catch (IOException ignored) {
+                // Best effort.
+            }
+        }
+        if (session.process != null) {
+            session.process.destroy();
+        }
+        session.stdin = null;
+        session.process = null;
+    }
+
+    private static List<String> buildShellCommand(String command) {
+        String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (osName.contains("win")) {
+            return Arrays.asList("cmd.exe", "/c", command);
+        }
+        return Arrays.asList("/bin/sh", "-c", command);
     }
 
     private DeviceOutputSession openDeviceOutputSession(AudioFormat sourceFormat, AudioFormat preferredFormat) throws IOException {
@@ -1956,6 +2390,22 @@ public class StreamRecorder {
             return "stdin:" + sampleRate + "," + encoding + "," + channels;
         }
         return (streamUrl != null) ? streamUrl.toString() : "unknown";
+    }
+
+    private static final class PipeOutputSession {
+        private final String command;
+        private Process process;
+        private OutputStream stdin;
+        private boolean broken;
+        private long nextRestartAttemptAtMillis;
+
+        private PipeOutputSession(String command) {
+            this.command = command;
+            this.process = null;
+            this.stdin = null;
+            this.broken = false;
+            this.nextRestartAttemptAtMillis = 0L;
+        }
     }
 
     private static final class DeviceOutputSession {

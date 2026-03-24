@@ -27,9 +27,23 @@ public class RadioPipeMain
 
         options.addOption(new Option("?", "help", false, "Shows help"));
         options.addOption(Option.builder("u").longOpt("url").hasArg().argName("URL")
-            .desc("Shoutcast/Icecast stream URL to record (use exactly one of --url or --stdin)").build());
+            .desc("Shoutcast/Icecast stream URL to record (use exactly one of --url, --stdin, or --pipe-input)").build());
         options.addOption(Option.builder("i").longOpt("stdin")
-            .desc("Read audio data from stdin (use exactly one of --url or --stdin)").build());
+            .desc("Read audio data from stdin (use exactly one of --url, --stdin, or --pipe-input)").build());
+        options.addOption(Option.builder().longOpt("pipe-input").hasArg().argName("COMMAND")
+            .desc("Launch command/process and read audio from its stdout (use exactly one of --url, --stdin, or --pipe-input)").build());
+        options.addOption(Option.builder().longOpt("pipe-input-raw")
+            .desc("Treat --pipe-input stdout as raw PCM bytes instead of containerized audio").build());
+        options.addOption(Option.builder().longOpt("pipe-input-rate").hasArg().argName("HZ")
+            .desc("Raw pipe input sample rate in Hz (default matches --sample-rate)").build());
+        options.addOption(Option.builder().longOpt("pipe-input-channels").hasArg().argName("N")
+            .desc("Raw pipe input channel count (default matches --channels)").build());
+        options.addOption(Option.builder().longOpt("pipe-input-bits").hasArg().argName("BITS")
+            .desc("Raw pipe input bit depth (default matches --bitrate)").build());
+        options.addOption(Option.builder().longOpt("pipe-input-big-endian")
+            .desc("Raw pipe input byte order is big-endian (default little-endian)").build());
+        options.addOption(Option.builder().longOpt("pipe-input-unsigned")
+            .desc("Raw pipe input samples are unsigned PCM (default signed PCM)").build());
         options.addOption(Option.builder().longOpt("stdin-raw")
             .desc("Treat stdin as raw PCM bytes instead of containerized audio").build());
         options.addOption(Option.builder().longOpt("stdin-rate").hasArg().argName("HZ")
@@ -50,6 +64,20 @@ public class RadioPipeMain
             .desc("Play gated audio to a hardware output device (index from --devs or mixer name)").build());
         options.addOption(Option.builder().longOpt("devs")
             .desc("List available hardware output devices and exit").build());
+        options.addOption(Option.builder().longOpt("pipe-output").hasArg().argName("COMMAND")
+            .desc("Launch command/process and pipe gated output audio to its stdin (repeatable)").build());
+        options.addOption(Option.builder().longOpt("pipe-output-raw")
+            .desc("Write gated audio to --pipe-output commands as raw PCM bytes instead of WAV clips").build());
+        options.addOption(Option.builder().longOpt("pipe-output-rate").hasArg().argName("HZ")
+            .desc("Raw pipe output sample rate in Hz (default matches --sample-rate)").build());
+        options.addOption(Option.builder().longOpt("pipe-output-channels").hasArg().argName("N")
+            .desc("Raw pipe output channel count (default matches --channels)").build());
+        options.addOption(Option.builder().longOpt("pipe-output-bits").hasArg().argName("BITS")
+            .desc("Raw pipe output bit depth (default matches --bitrate)").build());
+        options.addOption(Option.builder().longOpt("pipe-output-big-endian")
+            .desc("Raw pipe output byte order is big-endian (default little-endian)").build());
+        options.addOption(Option.builder().longOpt("pipe-output-unsigned")
+            .desc("Raw pipe output samples are unsigned PCM (default signed PCM)").build());
         options.addOption(Option.builder().longOpt("stdout-raw")
             .desc("Write gated audio to stdout as raw PCM bytes").build());
         options.addOption(Option.builder().longOpt("stdout-pad")
@@ -110,6 +138,9 @@ public class RadioPipeMain
 
             // gather options
             boolean hasUrl = cmd.hasOption("u");
+                boolean usePipeInput = cmd.hasOption("pipe-input");
+                String pipeInputCommand = cmd.getOptionValue("pipe-input");
+                boolean pipeInputRaw = cmd.hasOption("pipe-input-raw");
             boolean useStdin = cmd.hasOption("i");
             boolean stdinRaw = cmd.hasOption("stdin-raw");
             boolean hasRawFormatFlags = cmd.hasOption("stdin-rate")
@@ -117,11 +148,23 @@ public class RadioPipeMain
                     || cmd.hasOption("stdin-bits")
                     || cmd.hasOption("stdin-big-endian")
                     || cmd.hasOption("stdin-unsigned");
+                boolean hasPipeInputRawFormatFlags = cmd.hasOption("pipe-input-rate")
+                    || cmd.hasOption("pipe-input-channels")
+                    || cmd.hasOption("pipe-input-bits")
+                    || cmd.hasOption("pipe-input-big-endian")
+                    || cmd.hasOption("pipe-input-unsigned");
             boolean useStdout = cmd.hasOption("stdout");
             String outputDeviceSelector = cmd.getOptionValue("dev");
+            String[] pipeCommands = cmd.getOptionValues("pipe-output");
+            boolean pipeOutputRaw = cmd.hasOption("pipe-output-raw");
             boolean stdoutRaw = cmd.hasOption("stdout-raw");
                 boolean stdoutPad = cmd.hasOption("stdout-pad");
                 long stdoutPadDelayMs = Long.parseLong(cmd.getOptionValue("stdout-pad-delay", "500"));
+                boolean hasPipeRawFormatFlags = cmd.hasOption("pipe-output-rate")
+                    || cmd.hasOption("pipe-output-channels")
+                    || cmd.hasOption("pipe-output-bits")
+                    || cmd.hasOption("pipe-output-big-endian")
+                    || cmd.hasOption("pipe-output-unsigned");
             boolean hasStdoutRawFormatFlags = cmd.hasOption("stdout-rate")
                     || cmd.hasOption("stdout-channels")
                     || cmd.hasOption("stdout-bits")
@@ -130,6 +173,10 @@ public class RadioPipeMain
             if (hasRawFormatFlags || stdinRaw)
             {
                 useStdin = true; // if any raw format flags are set, we require stdin input
+            }
+            if (hasPipeInputRawFormatFlags || pipeInputRaw)
+            {
+                usePipeInput = true;
             }
             if (hasStdoutRawFormatFlags || stdoutRaw)
             {
@@ -149,8 +196,31 @@ public class RadioPipeMain
             if (outputDeviceSelector != null && outputDeviceSelector.trim().isEmpty()) {
                 throw new ParseException("dev must not be empty; use --devs to list devices");
             }
-            if (hasUrl == useStdin) {
-                throw new ParseException("Specify exactly one input source: --url <URL> or --stdin");
+            if (usePipeInput && isBlank(pipeInputCommand)) {
+                throw new ParseException("pipe-input command must not be empty");
+            }
+            if (pipeCommands != null) {
+                for (String pipeCommand : pipeCommands) {
+                    if (isBlank(pipeCommand)) {
+                        throw new ParseException("pipe-output command must not be empty");
+                    }
+                }
+            }
+            if (hasPipeRawFormatFlags && !pipeOutputRaw) {
+                pipeOutputRaw = true;
+            }
+            if (hasPipeInputRawFormatFlags && !pipeInputRaw) {
+                pipeInputRaw = true;
+            }
+            if (pipeOutputRaw && (pipeCommands == null || pipeCommands.length == 0)) {
+                throw new ParseException("--pipe-output-raw requires at least one --pipe-output command");
+            }
+            if (pipeInputRaw && !usePipeInput) {
+                throw new ParseException("--pipe-input-raw requires --pipe-input <COMMAND>");
+            }
+            int inputSourceCount = (hasUrl ? 1 : 0) + (useStdin ? 1 : 0) + (usePipeInput ? 1 : 0);
+            if (inputSourceCount != 1) {
+                throw new ParseException("Specify exactly one input source: --url <URL>, --stdin, or --pipe-input <COMMAND>");
             }
             if (hasRawFormatFlags && !stdinRaw) {
                 stdinRaw = true; // if any raw format flags are set, we assume raw mode
@@ -197,7 +267,9 @@ public class RadioPipeMain
                 throw new ParseException("gain must be a numeric value in dB");
             }
             boolean autoGain = cmd.hasOption("auto-gain");
+            AudioFormat pipeInputRawFormat = null;
             AudioFormat stdoutRawFormat = null;
+            AudioFormat pipeOutputRawFormat = null;
 
             if (outputSampleRate <= 0) {
                 throw new ParseException("sample-rate must be > 0");
@@ -273,8 +345,68 @@ public class RadioPipeMain
                         stdoutBigEndian);
             }
 
+            if (pipeOutputRaw) {
+                float pipeSampleRate = Float.parseFloat(cmd.getOptionValue("pipe-output-rate", String.valueOf(outputSampleRate)));
+                int pipeChannels = Integer.parseInt(cmd.getOptionValue("pipe-output-channels", String.valueOf(outputChannels)));
+                int pipeBitDepth = Integer.parseInt(cmd.getOptionValue("pipe-output-bits", String.valueOf(outputBitDepth)));
+                boolean pipeBigEndian = cmd.hasOption("pipe-output-big-endian");
+                boolean pipeUnsigned = cmd.hasOption("pipe-output-unsigned");
+
+                if (pipeSampleRate <= 0) {
+                    throw new ParseException("pipe-output-rate must be > 0");
+                }
+                if (pipeChannels <= 0) {
+                    throw new ParseException("pipe-output-channels must be > 0");
+                }
+                if (pipeBitDepth <= 0 || pipeBitDepth % 8 != 0) {
+                    throw new ParseException("pipe-output-bits must be a positive multiple of 8");
+                }
+
+                AudioFormat.Encoding pipeEncoding = pipeUnsigned
+                        ? AudioFormat.Encoding.PCM_UNSIGNED
+                        : AudioFormat.Encoding.PCM_SIGNED;
+                pipeOutputRawFormat = new AudioFormat(
+                        pipeEncoding,
+                        pipeSampleRate,
+                        pipeBitDepth,
+                        pipeChannels,
+                        pipeChannels * (pipeBitDepth / 8),
+                        pipeSampleRate,
+                        pipeBigEndian);
+            }
+
+            if (pipeInputRaw) {
+                float pipeInputSampleRate = Float.parseFloat(cmd.getOptionValue("pipe-input-rate", String.valueOf(outputSampleRate)));
+                int pipeInputChannels = Integer.parseInt(cmd.getOptionValue("pipe-input-channels", String.valueOf(outputChannels)));
+                int pipeInputBitDepth = Integer.parseInt(cmd.getOptionValue("pipe-input-bits", String.valueOf(outputBitDepth)));
+                boolean pipeInputBigEndian = cmd.hasOption("pipe-input-big-endian");
+                boolean pipeInputUnsigned = cmd.hasOption("pipe-input-unsigned");
+
+                if (pipeInputSampleRate <= 0) {
+                    throw new ParseException("pipe-input-rate must be > 0");
+                }
+                if (pipeInputChannels <= 0) {
+                    throw new ParseException("pipe-input-channels must be > 0");
+                }
+                if (pipeInputBitDepth <= 0 || pipeInputBitDepth % 8 != 0) {
+                    throw new ParseException("pipe-input-bits must be a positive multiple of 8");
+                }
+
+                AudioFormat.Encoding pipeInputEncoding = pipeInputUnsigned
+                        ? AudioFormat.Encoding.PCM_UNSIGNED
+                        : AudioFormat.Encoding.PCM_SIGNED;
+                pipeInputRawFormat = new AudioFormat(
+                        pipeInputEncoding,
+                        pipeInputSampleRate,
+                        pipeInputBitDepth,
+                        pipeInputChannels,
+                        pipeInputChannels * (pipeInputBitDepth / 8),
+                        pipeInputSampleRate,
+                        pipeInputBigEndian);
+            }
+
             StreamRecorder recorder;
-            if (useStdin) {
+            if (useStdin || usePipeInput) {
                 if (stdinRaw) {
                     float stdinSampleRate = Float.parseFloat(cmd.getOptionValue("stdin-rate", String.valueOf(outputSampleRate)));
                     int stdinChannels = Integer.parseInt(cmd.getOptionValue("stdin-channels", String.valueOf(outputChannels)));
@@ -351,6 +483,9 @@ public class RadioPipeMain
             recorder.setGainControl(gainDb, autoGain);
             recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad, stdoutPadDelayMs);
             recorder.setDeviceOutput(outputDeviceSelector);
+            recorder.setPipeOutputs(pipeCommands);
+            recorder.setPipeRawOutput(pipeOutputRaw, pipeOutputRawFormat);
+            recorder.setPipeInput(usePipeInput ? pipeInputCommand : null, pipeInputRaw, pipeInputRawFormat);
             recorder.setApiWebSocketServer(apiWebSocketServer);
             final ApiWebSocketServer shutdownApiWebSocketServer = apiWebSocketServer;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {

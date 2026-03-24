@@ -7,10 +7,11 @@ Built for unattended logging, RadioPipe stores WAV clips in date-based folders a
 ## Feature Overview
 
 * Records only active audio (RMS gating) to avoid silence-heavy files
-* Accepts stream URLs (`--url`) or piped audio (`--stdin`, including raw PCM)
+* Accepts stream URLs (`--url`), stdin audio (`--stdin`), or command-generated audio (`--pipe-input`)
 * Supports optional DCS/CTCSS gating for tone/code-controlled recording
 * Can emit gated audio to stdout as WAV clips or raw PCM (`--stdout` / `--stdout-raw`)
 * Can play gated audio directly to a selected hardware output device (`--dev`, `--devs`)
+* Can launch one or more pipe commands and stream output audio to each command stdin (`--pipe-output` / `--pipe-output-raw`)
 * Can publish real-time recorder events over WebSocket (`--api-websocket host:port`)
 * Writes date-organized clips with stream metadata and timestamped filenames
 * Supports post-write automation hooks (`--on-write`) for conversion/upload workflows
@@ -118,7 +119,7 @@ By default, the watchdog posts `action=list` with `source=<service-name>` on eac
 
 
 ## Usages
-You can run the recorder against either a Shoutcast/Icecast stream URL or audio from stdin.
+You can run the recorder against a Shoutcast/Icecast stream URL, stdin audio, or audio produced by a launched command.
 Recordings are broken into WAV files whenever the stream goes silent and are placed in day‑based folders.
 
 URL example:
@@ -143,12 +144,28 @@ $ sox /path/to/input.mp3 -t wav - \
   | ./radio-pipe --stdin -o ./recordings
 ```
 
+pipe input example (launch app and read its stdout as input):
+```bash
+$ ./radio-pipe --pipe-input "arecord -D pulse -f S16_LE -c 1 -r 8000 -t wav -" \
+  -o ./recordings
+```
+
 raw PCM stdin example (`arecord`):
 ```bash
 $ arecord -f S16_LE -c 1 -r 8000 -t raw - \
   | ./radio-pipe --stdin --stdin-raw \
     --stdin-rate 8000 --stdin-channels 1 --stdin-bits 16 \
     -o ./recordings
+```
+
+raw PCM pipe input example (explicit format):
+```bash
+$ ./radio-pipe --pipe-input "arecord -D pulse -f S16_LE -c 1 -r 8000 -t raw -" \
+  --pipe-input-raw \
+  --pipe-input-rate 8000 \
+  --pipe-input-channels 1 \
+  --pipe-input-bits 16 \
+  -o ./recordings
 ```
 
 raw PCM stdout example (gate audio for another program):
@@ -186,6 +203,36 @@ $ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
 
 `--dev` accepts either a device index from `--devs` (example: `--dev 0`) or a case-insensitive name/description substring (example: `--dev USB`).
 
+pipe output example (launch process and send WAV clip stream to stdin):
+```bash
+$ ./radio-pipe -u http://example.com:8000/stream.mp3 \
+  -o ./recordings \
+  --pipe-output "aplay -D pulse"
+```
+
+multiple pipe outputs (repeat `--pipe-output`):
+```bash
+$ ./radio-pipe -u http://example.com:8000/stream.mp3 \
+  -o ./recordings \
+  --pipe-output "aplay -D pulse" \
+  --pipe-output "ffplay -autoexit -nodisp -i -"
+```
+
+By default, `--pipe-output` writes a WAV clip payload when a clip closes. If a pipe process exits, RadioPipe will try to restart it automatically.
+
+raw pipe output example (explicit PCM format):
+```bash
+$ ./radio-pipe -u http://example.com:8000/stream.mp3 \
+  -o ./recordings \
+  --pipe-output "aplay -f S16_LE -r 8000 -c 1" \
+  --pipe-output-raw \
+  --pipe-output-rate 8000 \
+  --pipe-output-channels 1 \
+  --pipe-output-bits 16
+```
+
+`--pipe-output` is always WAV clip output. Use `--pipe-output-raw` to send raw PCM stream to the same pipe commands. Raw format flags are `--pipe-output-rate`, `--pipe-output-channels`, `--pipe-output-bits`, `--pipe-output-big-endian`, and `--pipe-output-unsigned`.
+
 Note: Combining higher fixed `--gain` values with `--auto-gain` can increase clipping on loud signals; reduce `--gain` if output sounds distorted.
 
 websocket API example (publish gate/hook events to clients):
@@ -209,6 +256,8 @@ RadioPipe uses one internal processing path regardless of whether audio comes fr
   * `--url`: Shoutcast/Icecast stream
   * `--stdin`: containerized audio from stdin
   * `--stdin --stdin-raw`: raw PCM from stdin using the `--stdin-rate`, `--stdin-channels`, and `--stdin-bits` settings
+  * `--pipe-input`: containerized audio from a launched command's stdout
+  * `--pipe-input --pipe-input-raw`: raw PCM from a launched command's stdout using `--pipe-input-rate`, `--pipe-input-channels`, and `--pipe-input-bits`
 2. The input is decoded into signed 16-bit PCM for analysis.
 3. An input de-jitter buffer smooths short read stalls before the gate logic runs.
 4. Audio is processed in small chunks and evaluated by the gate stages described below.
@@ -223,6 +272,9 @@ RadioPipe uses one internal processing path regardless of whether audio comes fr
   * `--on-write` runs after a file clip is written
 9. In `--stdout --stdout-raw` mode, gated audio is emitted immediately as PCM instead of waiting for clip close. With `--stdout-pad`, the raw stdout path stays continuous by outputting silence during stalls or closed-gate periods.
 10. In `--dev` mode, gated audio is also emitted immediately to the selected hardware playback device (using Java Sound output mixers).
+11. In `--pipe-output` mode, each configured command is launched by RadioPipe and receives WAV clip payloads through stdin (repeat `--pipe-output` to fan out to multiple consumers).
+12. In `--pipe-output-raw` mode, those same pipe commands receive raw PCM stream data using the configured `--pipe-output-*` format flags.
+13. In `--pipe-input` mode, RadioPipe launches the configured command and treats that command's stdout as input audio; if the command exits, RadioPipe retries with backoff.
 
 ### Gate stages in evaluation order
 
