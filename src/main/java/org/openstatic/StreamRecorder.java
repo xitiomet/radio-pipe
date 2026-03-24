@@ -1324,7 +1324,7 @@ public class StreamRecorder {
             return;
         }
 
-        AudioFormat targetFormat = (this.pipeRawFormat == null) ? sourceFormat : this.pipeRawFormat;
+        AudioFormat targetFormat = (this.stdoutRawFormat == null) ? sourceFormat : this.stdoutRawFormat;
 
         if (audioFormatsEquivalent(sourceFormat, targetFormat)) {
             synchronized (System.out) {
