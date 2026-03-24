@@ -218,7 +218,7 @@ $ ./radio-pipe -u http://example.com:8000/stream.mp3 \
   --pipe-output "ffplay -autoexit -nodisp -i -"
 ```
 
-By default, `--pipe-output` writes a WAV clip payload when a clip closes. If a pipe process exits, RadioPipe will try to restart it automatically.
+By default, `--pipe-output` writes a WAV clip payload when a clip closes. If a pipe process exits, RadioPipe will try to restart it automatically. When using `--pipe-output` without `-o`, recordings are not written to disk (pipe-output-only mode).
 
 raw pipe output example (explicit PCM format):
 ```bash
@@ -498,6 +498,8 @@ When using both --dcs and --ctcss, both gates must match for clips to open.
 
 When using --stdout without -o, recordings are not written to disk (stdout-only mode).
 
+When using --pipe-output without -o, recordings are not written to disk (pipe-output-only mode).
+
 If `RADIOPIPE_RECORDINGS` is set (and non-empty), it is used as the default recordings directory whenever file recording is enabled and `-o` does not provide a path (including bare `-o`).
 
 On Linux/macOS shells, this value must be exported (for example, `export RADIOPIPE_RECORDINGS=/path`) so child processes like `radio-pipe` can read it.
@@ -529,6 +531,8 @@ radio-pipe.exe --url http://example.com/stream.mp3 --stdout -o
 ```
 
 `--stdout` by itself remains stdout-only (no disk writes); adding bare `-o` enables file recording using `$RADIOPIPE_RECORDINGS` (or `./recordings` when unset).
+
+`--pipe-output` by itself remains pipe-output-only (no disk writes); adding bare `-o` enables file recording using `$RADIOPIPE_RECORDINGS` (or `./recordings` when unset).
 
 `--on-write` requires file recording (`-o`) and is ignored in stdout-only mode.
 

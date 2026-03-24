@@ -160,6 +160,7 @@ public class RadioPipeMain
             boolean useStdout = cmd.hasOption("stdout");
             String outputDeviceSelector = cmd.getOptionValue("dev");
             String[] pipeCommands = cmd.getOptionValues("pipe-output");
+            boolean usePipeOutput = pipeCommands != null && pipeCommands.length > 0;
             boolean pipeOutputRaw = cmd.hasOption("pipe-output-raw");
             boolean pipeOutputPad = cmd.hasOption("pipe-output-pad");
             long pipeOutputPadDelayMs = Long.parseLong(cmd.getOptionValue("pipe-output-pad-delay", "500"));
@@ -246,11 +247,12 @@ public class RadioPipeMain
             boolean hasOutDir = cmd.hasOption("o");
             Path outDir = null;
             ResolvedRecordingsDirectory resolvedRecordingsDirectory = null;
-            if (!useStdout || hasOutDir) {
+            boolean outputOnlyMode = (useStdout || usePipeOutput) && !hasOutDir;
+            if (!outputOnlyMode) {
                 resolvedRecordingsDirectory = resolveRecordingsDirectory(cmd.getOptionValue("o"));
                 outDir = ensureRecordingsDirectory(resolvedRecordingsDirectory.directory);
             }
-            logRecordingsDirectorySelection(outDir, resolvedRecordingsDirectory, useStdout, hasOutDir);
+            logRecordingsDirectorySelection(outDir, resolvedRecordingsDirectory, useStdout, usePipeOutput, hasOutDir);
             double threshold = Double.parseDouble(cmd.getOptionValue("t", "-50"));
             double silenceSeconds = Double.parseDouble(cmd.getOptionValue("s", "2"));
             float outputSampleRate = Float.parseFloat(cmd.getOptionValue("r", "8000"));
@@ -669,11 +671,18 @@ public class RadioPipeMain
     private static void logRecordingsDirectorySelection(Path outDir,
                                                         ResolvedRecordingsDirectory resolvedRecordingsDirectory,
                                                         boolean useStdout,
+                                                        boolean usePipeOutput,
                                                         boolean hasOutDir)
     {
         if (outDir == null) {
-            if (useStdout && !hasOutDir) {
-                System.err.println("startup: file recording disabled (stdout-only mode: --stdout without -o)");
+            if ((useStdout || usePipeOutput) && !hasOutDir) {
+                if (useStdout && usePipeOutput) {
+                    System.err.println("startup: file recording disabled (output-only mode: --stdout/--pipe-output without -o)");
+                } else if (useStdout) {
+                    System.err.println("startup: file recording disabled (stdout-only mode: --stdout without -o)");
+                } else {
+                    System.err.println("startup: file recording disabled (pipe-output-only mode: --pipe-output without -o)");
+                }
             } else {
                 System.err.println("startup: file recording disabled (no recordings directory configured)");
             }
