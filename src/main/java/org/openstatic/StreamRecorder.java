@@ -101,6 +101,7 @@ public class StreamRecorder {
     private volatile boolean autoGainEnabled;
     private volatile double smoothedAutoGainDb;
     private volatile boolean voiceFilterEnabled;
+    private volatile String inputDeviceSelector;
     private volatile ApiWebSocketServer apiWebSocketServer;
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_DATE;
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HHmmss");
@@ -258,6 +259,7 @@ public class StreamRecorder {
         this.autoGainEnabled = false;
         this.smoothedAutoGainDb = 0.0;
         this.voiceFilterEnabled = false;
+        this.inputDeviceSelector = null;
         this.apiWebSocketServer = null;
     }
 
@@ -358,6 +360,10 @@ public class StreamRecorder {
         this.deviceConfigLogged = false;
     }
 
+    public void setDeviceInput(String deviceSelector) {
+        this.inputDeviceSelector = isBlank(deviceSelector) ? null : deviceSelector.trim();
+    }
+
     public void setPipeOutputs(String[] pipeCommands) {
         this.pipeOutputCommands.clear();
         if (pipeCommands != null) {
@@ -436,6 +442,10 @@ public class StreamRecorder {
 
     public void run() throws Exception {
         logHookConfiguration();
+        if (!isBlank(this.inputDeviceSelector)) {
+            runFromInputDevice();
+            return;
+        }
         if (!isBlank(this.pipeInputCommand)) {
             runFromPipeInput();
             return;
@@ -572,6 +582,117 @@ public class StreamRecorder {
         }, "pipe-input-stderr-" + Math.abs(command.hashCode()));
         stderrThread.setDaemon(true);
         stderrThread.start();
+    }
+
+    private void runFromInputDevice() throws Exception {
+        String selector = this.inputDeviceSelector;
+        Mixer.Info mixerInfo = resolveInputMixerInfo(selector);
+        Mixer mixer = AudioSystem.getMixer(mixerInfo);
+
+        AudioFormat captureFormat = new AudioFormat(
+                AudioFormat.Encoding.PCM_SIGNED,
+                this.outputSampleRate,
+                this.outputBitDepth,
+                this.outputChannels,
+                this.outputChannels * (this.outputBitDepth / 8),
+                this.outputSampleRate,
+                this.outputBigEndian);
+
+        DataLine.Info lineInfo = new DataLine.Info(TargetDataLine.class, captureFormat);
+        if (!mixer.isLineSupported(lineInfo)) {
+            captureFormat = new AudioFormat(
+                    AudioFormat.Encoding.PCM_SIGNED,
+                    44100.0f,
+                    16,
+                    1,
+                    2,
+                    44100.0f,
+                    false);
+            lineInfo = new DataLine.Info(TargetDataLine.class, captureFormat);
+            if (!mixer.isLineSupported(lineInfo)) {
+                throw new IOException("Selected input device does not support a usable capture format");
+            }
+            log("INPUT-DEV", ANSI_YELLOW,
+                    "device does not support preferred format; using "
+                            + describeAudioFormat(captureFormat));
+        }
+
+        log("CONNECT", ANSI_BLUE, "Opening input device: " + describeMixer(mixerInfo));
+
+        try {
+            TargetDataLine line = (TargetDataLine) mixer.getLine(lineInfo);
+            line.open(captureFormat);
+            line.start();
+            log("INPUT-DEV", ANSI_CYAN,
+                    "capturing from " + describeMixer(mixerInfo)
+                            + " at " + describeAudioFormat(captureFormat));
+            try (AudioInputStream audio = new AudioInputStream(line)) {
+                processInput(audio);
+            } finally {
+                line.stop();
+                line.close();
+            }
+        } catch (LineUnavailableException lue) {
+            throw new IOException("Unable to open selected input device: " + lue.getMessage(), lue);
+        }
+
+        if (running) {
+            log("STOP", ANSI_YELLOW, "Input device stream ended, recorder exiting.");
+        }
+    }
+
+    private static Mixer.Info resolveInputMixerInfo(String selector) throws IOException {
+        if (isBlank(selector)) {
+            throw new IOException("Audio input device selector is missing; use --input-devs to list devices");
+        }
+
+        Mixer.Info[] mixers = AudioSystem.getMixerInfo();
+        Integer index = parseInteger(selector);
+        if (index != null) {
+            if (index < 0 || index >= mixers.length) {
+                throw new IOException("Audio device index out of range: " + selector);
+            }
+            Mixer mixer = AudioSystem.getMixer(mixers[index]);
+            DataLine.Info lineInfo = new DataLine.Info(TargetDataLine.class, null);
+            if (!mixer.isLineSupported(lineInfo)) {
+                throw new IOException("Audio device index " + selector + " is not an input capture device");
+            }
+            return mixers[index];
+        }
+
+        Mixer.Info exactMatch = null;
+        Mixer.Info partialMatch = null;
+        String wanted = selector.trim().toLowerCase(Locale.ROOT);
+        DataLine.Info captureLine = new DataLine.Info(TargetDataLine.class, null);
+        for (Mixer.Info info : mixers) {
+            Mixer mixer = AudioSystem.getMixer(info);
+            if (!mixer.isLineSupported(captureLine)) {
+                continue;
+            }
+
+            String name = info.getName();
+            if (name != null && name.equalsIgnoreCase(selector.trim())) {
+                exactMatch = info;
+                break;
+            }
+
+            String normalizedName = (name == null) ? "" : name.toLowerCase(Locale.ROOT);
+            String normalizedDescription = (info.getDescription() == null)
+                    ? ""
+                    : info.getDescription().toLowerCase(Locale.ROOT);
+            if (partialMatch == null
+                    && (normalizedName.contains(wanted) || normalizedDescription.contains(wanted))) {
+                partialMatch = info;
+            }
+        }
+
+        if (exactMatch != null) {
+            return exactMatch;
+        }
+        if (partialMatch != null) {
+            return partialMatch;
+        }
+        throw new IOException("No matching input device for selector '" + selector + "'; use --input-devs to list devices");
     }
 
     private void processInput(InputStream raw) throws Exception {
@@ -1899,7 +2020,7 @@ public class StreamRecorder {
 
     private static Mixer.Info resolveOutputMixerInfo(String selector) throws IOException {
         if (isBlank(selector)) {
-            throw new IOException("Audio device selector is missing; use --devs to list devices");
+            throw new IOException("Audio device selector is missing; use --output-devs to list devices");
         }
 
         Mixer.Info[] mixers = AudioSystem.getMixerInfo();
@@ -1948,7 +2069,7 @@ public class StreamRecorder {
         if (partialMatch != null) {
             return partialMatch;
         }
-        throw new IOException("No matching output device for selector '" + selector + "'; use --devs to list devices");
+        throw new IOException("No matching output device for selector '" + selector + "'; use --output-devs to list devices");
     }
 
     private static Integer parseInteger(String value) {

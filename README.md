@@ -7,10 +7,10 @@ Built for unattended logging, RadioPipe stores WAV clips in date-based folders a
 ## Feature Overview
 
 * Records only active audio (RMS gating) to avoid silence-heavy files
-* Accepts stream URLs (`--url`), stdin audio (`--stdin`), or command-generated audio (`--pipe-input`)
+* Accepts stream URLs (`--url`), stdin audio (`--stdin`), command-generated audio (`--pipe-input`), or hardware input devices (`--input-dev`)
 * Supports optional DCS/CTCSS gating for tone/code-controlled recording
 * Can emit gated audio to stdout as WAV clips or raw PCM (`--stdout` / `--stdout-raw`)
-* Can play gated audio directly to a selected hardware output device (`--dev`, `--devs`)
+* Can play gated audio directly to a selected hardware output device (`--output-dev`, `--output-devs`)
 * Can launch one or more pipe commands and stream output audio to each command stdin (`--pipe-output` / `--pipe-output-raw`)
 * Can publish real-time recorder events over WebSocket (`--api-websocket host:port`)
 * Writes date-organized clips with stream metadata and timestamped filenames
@@ -191,12 +191,12 @@ $ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
 
 list hardware output devices and play to one:
 ```bash
-$ ./radio-pipe --devs
+$ ./radio-pipe --output-devs
 
 $ rtl_fm -f 462.550M -M fm -s 12000 -r 8000 -E deemp -l 25 \
   | ./radio-pipe --stdin --stdin-raw \
     --sample-rate 8000 --channels 1 --bitrate 16 \
-    --dcs 023 --dev 0 -o ./recordings
+    --dcs 023 --output-dev 0 -o ./recordings
 ```
 
 shared defaults with recording-specific override:
@@ -209,7 +209,16 @@ $ arecord -f S16_LE -c 1 -r 8000 -t raw - \
     --stdout --stdout-raw --stdout-endian big
 ```
 
-`--dev` accepts either a device index from `--devs` (example: `--dev 0`) or a case-insensitive name/description substring (example: `--dev USB`).
+`--output-dev` accepts either a device index from `--output-devs` (example: `--output-dev 0`) or a case-insensitive name/description substring (example: `--output-dev USB`).
+
+list hardware input devices and record from one:
+```bash
+$ ./radio-pipe --input-devs
+
+$ ./radio-pipe --input-dev 0 -o ./recordings
+```
+
+`--input-dev` accepts either a device index from `--input-devs` (example: `--input-dev 0`) or a case-insensitive name/description substring (example: `--input-dev USB`).
 
 pipe output example (launch process and send WAV clip stream to stdin):
 ```bash
@@ -282,7 +291,7 @@ RadioPipe uses one internal processing path regardless of whether audio comes fr
   * `--stdout` writes the finished clip to stdout as WAV
   * `--on-write` runs after a file clip is written
 9. In `--stdout --stdout-raw` mode, gated audio is emitted immediately as PCM instead of waiting for clip close. With `--stdout-pad`, the raw stdout path stays continuous by outputting silence during stalls or closed-gate periods.
-10. In `--dev` mode, gated audio is also emitted immediately to the selected hardware playback device (using Java Sound output mixers).
+10. In `--output-dev` mode, gated audio is also emitted immediately to the selected hardware playback device (using Java Sound output mixers).
 11. In `--pipe-output` mode, each configured command is launched by RadioPipe and receives WAV clip payloads through stdin (repeat `--pipe-output` to fan out to multiple consumers).
 12. In `--pipe-output-raw` mode, those same pipe commands receive raw PCM stream data using the configured `--pipe-output-*` format flags.
 13. In `--pipe-input` mode, RadioPipe launches the configured command and treats that command's stdout as input audio; if the command exits, RadioPipe retries with backoff.
