@@ -218,6 +218,16 @@ $ ./radio-pipe --input-devs
 $ ./radio-pipe --input-dev 0 -o ./recordings
 ```
 
+input device with explicit capture format:
+```bash
+$ ./radio-pipe --input-dev 0 \
+  --input-dev-sample-rate 44100 \
+  --input-dev-channels 1 \
+  --input-dev-bits 16 \
+  --input-dev-endian little \
+  -o ./recordings
+```
+
 `--input-dev` accepts either a device index from `--input-devs` (example: `--input-dev 0`) or a case-insensitive name/description substring (example: `--input-dev USB`).
 
 pipe output example (launch process and send WAV clip stream to stdin):
@@ -277,6 +287,7 @@ RadioPipe uses one internal processing path regardless of whether audio comes fr
   * `--stdin --stdin-raw`: raw PCM from stdin using the `--stdin-rate`, `--stdin-channels`, `--stdin-bits`, and optional `--stdin-endian` settings
   * `--pipe-input`: containerized audio from a launched command's stdout
   * `--pipe-input --pipe-input-raw`: raw PCM from a launched command's stdout using `--pipe-input-rate`, `--pipe-input-channels`, `--pipe-input-bits`, and optional `--pipe-input-endian`
+  * `--input-dev`: audio from a hardware input device using `--input-dev-sample-rate`, `--input-dev-channels`, `--input-dev-bits`, and optional `--input-dev-endian`
 2. The input is decoded into signed 16-bit PCM for analysis.
 3. An input de-jitter buffer smooths short read stalls before the gate logic runs.
 4. Audio is processed in small chunks and evaluated by the gate stages described below.
@@ -443,8 +454,9 @@ Use this section as a full reference. If you are skimming, start with the quick 
 
 ### Option groups (quick map)
 
-* **Input source**: `--url` or `--stdin` (exactly one is required)
+* **Input source**: `--url` or `--stdin` or `--pipe-input` or `--input-dev` (exactly one is required)
 * **Raw stdin format**: `--stdin-raw`, `--stdin-rate`, `--stdin-channels`, `--stdin-bits`, `--stdin-endian`, `--stdin-unsigned`, `--input-dejitter`
+* **Input device format**: `--input-dev-sample-rate`, `--input-dev-channels`, `--input-dev-bits`, `--input-dev-endian`
 * **Output modes**: file recording with `-o`, clip/WAV stdout with `--stdout`, raw stdout with `--stdout-raw`, continuous padded raw stream with `--stdout-pad`
 * **Audio/clip parameters**: `-t`, `-s`, `-r`, `-c`, `-b`
 * **Tone/code gating**: `--dcs`, `--ctcss`, `--gate-hold`
@@ -461,6 +473,12 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * --stdin-endian <ORDER> – raw stdin byte order: `little` or `big` (default matches --endian)
 * --stdin-unsigned – raw stdin encoding is unsigned PCM (default signed PCM)
 * --input-dejitter <MS> – input de-jitter buffer depth for bursty piped input (default `250`)
+* --input-dev <DEVICE> – read audio from a hardware input device (index from `--input-devs` or mixer name)
+* --input-devs – list available hardware input devices and exit
+* --input-dev-sample-rate <HZ> – input device capture sample rate in Hz (default matches `--sample-rate`)
+* --input-dev-channels <N> – input device capture channel count (default matches `--channels`)
+* --input-dev-bits <BITS> – input device capture bit depth (default matches `--bitrate`)
+* --input-dev-endian <ORDER> – input device capture byte order: `little` or `big` (default matches `--endian`)
 * --stdout – write gated clips to stdout as WAV clip stream
 * --stdout-raw – write gated audio to stdout as raw PCM bytes
 * --stdout-pad – when stdout raw mode is enabled, output a continuous gapless stream (gated audio + silence padding); no halt at startup or mid-stream stall
@@ -494,7 +512,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
   written; if {wav} is omitted, the full WAV path is passed as argument 1
 * -?,--help – display help and exit
 
-Exactly one input source is required: `--url` or `--stdin`.
+Exactly one input source is required: `--url`, `--stdin`, `--pipe-input`, or `--input-dev`.
 
 When using --stdin without --stdin-raw, provide a Java Sound readable stream format (WAV is recommended).
 
@@ -527,6 +545,8 @@ When using both --dcs and --ctcss, both gates must match for clips to open.
 `--voice-filter` applies a post-gate voice-focused band-pass (`300-3400 Hz`) to passing audio frames before gain/output.
 
 When using --stdout without -o, recordings are not written to disk (stdout-only mode).
+
+When using --output-dev without -o, recordings are not written to disk (output-dev-only mode).
 
 When using --pipe-output without -o, recordings are not written to disk (pipe-output-only mode).
 
