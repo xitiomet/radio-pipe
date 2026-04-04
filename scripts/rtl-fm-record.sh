@@ -16,7 +16,7 @@ Optional:
 	-D, --dcs <code>         DCS gate code for recorder (octal, example: 023)
 	-C, --ctcss <hz>         CTCSS gate tone for recorder in Hz (example: 100.0)
   -R, --sample-rate <hz>   Sample rate for both rtl_fm and recorder stdin/output (default: 8000)
-  -o, --out <dir>          Output directory for recordings (default: ./recordings)
+  -o, --out <dir>          Output directory for recordings (default: radio-pipe default)
   -e, --exec <path>        radio-pipe executable (default: ./radio-pipe)
   -m, --mode <mode>        rtl_fm demod mode (default: fm)
   -d, --device <index>     rtl_fm device index
@@ -35,7 +35,7 @@ frequency=""
 squelch="0"
 dcs=""
 ctcss=""
-out_dir="./recordings"
+out_dir=""
 recorder_bin="radio-pipe"
 mode="fm"
 device=""
@@ -189,9 +189,12 @@ rec_cmd=(
 	-r "$sample_rate"
 	-t "$threshold"
 	-s "$silence"
-	-o "$out_dir"
 	-n "$stream_name"
 )
+
+if [[ -n "$out_dir" ]]; then
+	rec_cmd+=( -o "$out_dir" )
+fi
 
 if [[ -n "$on_write" ]]; then
 	rec_cmd+=( -x "$on_write" )
@@ -216,6 +219,8 @@ if [[ -n "$ctcss" ]]; then
 fi
 echo "  Rate:      ${sample_rate} Hz"
 echo "  Stream:    $stream_name"
-echo "  Output:    $out_dir"
+if [[ -n "$out_dir" ]]; then
+	echo "  Output:    $out_dir"
+fi
 
 "${rtl_cmd[@]}" 2>/dev/null | "${rec_cmd[@]}"

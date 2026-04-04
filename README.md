@@ -25,99 +25,6 @@ A recording path will look like:
 
 Regular builds can be found at [radio-pipe downloads](https://openstatic.org/projects/radio-pipe/#downloads) (scroll to the bottom)
 
-### PHP Recordings Browser
-![](https://openstatic.org/projects/radio-pipe/recordings_php.png)
-
-`php/recordings.php` provides a web interface for browsing and reviewing recordings.
-You only need a PHP-capable web server with these extensions:
-
-* php-zip
-* php-json
-
-The page can be moved or renamed. Point it at your recordings directory by setting a config file.
-
-Create `php/config.php` (recommended) with the following variables:
-```php
-<?php
-// Settings
-$recordingsRoot = '/mnt/Media/recordings';
-$PAGE_TITLE = 'Icecast Stream Recordings';
-// End Settings
-```
-
-If you are on Windows and want a quick setup, there is an experimental stand-alone package that sets up everything in `%APPDATA%`.
-
-[recordings-browser Installer](https://openstatic.org/projects/radio-pipe/recordings-browser.exe)
-You will likely see security warnings because it is a 7zip self-extracting archive.
-
-There is no uninstall, but you can right-click the shortcut, open its location, and delete the folder.
-
-### PHP RTL-SDR Manager
-![](https://openstatic.org/projects/radio-pipe/rtlsdr_manager.png)
-
-`php/rtl_sdr.php` is a single-page RTL-SDR control panel + JSON API. It starts and monitors `rtl_fm` pipelines, then routes audio into `radio-pipe` (recording), `ffmpeg` (live Icecast streaming), or both.
-
-It is designed for unattended radio capture setups where you need to tune, monitor, and recover multiple RTL-SDR pipelines from one page.
-
-#### What the page does
-
-* Discovers RTL-SDR dongles (index + serial aware)
-* Starts, stops, and retunes active device pipelines
-* Supports FM/WBFM/AM/USB/LSB/RAW modes
-* Supports optional DCS/CTCSS gating and bias-tee
-* Saves streaming server presets, recording upload presets, and reusable templates
-* Shows per-device logs in UI and supports log download
-* Tracks desired/running state and can auto-restart crashed pipelines with backoff
-
-#### Requirements for `rtl_sdr.php`
-
-* `rtl_fm` (`rtl-sdr` package)
-* `radio-pipe` in `PATH` (required for recording and stream conditioning)
-* `ffmpeg` in `PATH` (required when stream output is enabled)
-* `curl` in `PATH` (required only for After Record upload modes)
-
-#### Quick start
-
-1. Put `php/rtl_sdr.php` on a PHP-capable web server.
-2. (Recommended) create `php/config.php` and set your recordings directory:
-
-```php
-<?php
-$recordingsRoot = '/mnt/Media/recordings';
-```
-
-3. Open the page in your browser.
-
-Local test from this repo:
-
-```bash
-$ cd php
-$ ./server.sh
-# then open http://localhost:8000/rtl_sdr.php
-```
-
-#### Runtime files created next to `rtl_sdr.php`
-
-* `rtl_sdr_state.json` / `rtl_sdr_desired_state.json` - running and desired device state
-* `rtl_sdr_logs/` - per-device launch/runtime logs
-* `streaming_servers.json` - saved Icecast targets
-* `recording_servers.json` - saved upload targets for after-record actions
-* `rtl_sdr_templates.json` - saved templates/presets
-* `rtl_sdr_ui_settings.json` - saved per-device UI settings
-
-#### Watchdog and queued retunes (recommended)
-
-Retune actions are queued and applied by watchdog ticks. For unattended operation, install the included systemd timer/service:
-
-```bash
-$ sudo ./scripts/install_rtl_sdr_watchdog.sh --endpoint http://127.0.0.1/rtl_sdr.php
-```
-
-The installer now embeds the tick script into the installed target path (`--tick-dest`) and runs a preflight endpoint check before creating systemd units.
-
-By default, the watchdog posts `action=list` with `source=<service-name>` on each interval (override with `--action` and `--source`) to process queued retunes and periodic state cleanup.
-
-
 ## Usages
 You can run the recorder against a Shoutcast/Icecast stream URL, stdin audio, or audio produced by a launched command.
 Recordings are broken into WAV files whenever the stream goes silent and are placed in day‑based folders.
@@ -605,3 +512,99 @@ To compile this project, run:
 $ mvn package
 ```
 from a terminal.
+
+---
+
+# Extras!
+
+### PHP Recordings Browser
+![](https://openstatic.org/projects/radio-pipe/recordings_php.png)
+
+`php/recordings.php` provides a web interface for browsing and reviewing recordings.
+You only need a PHP-capable web server with these extensions:
+
+* php-zip
+* php-json
+
+The page can be moved or renamed. Point it at your recordings directory by setting a config file.
+
+Create `php/config.php` (recommended) with the following variables:
+```php
+<?php
+// Settings
+$recordingsRoot = '/mnt/Media/recordings';
+$PAGE_TITLE = 'Icecast Stream Recordings';
+// End Settings
+```
+
+If you are on Windows and want a quick setup, there is an experimental stand-alone package that sets up everything in `%APPDATA%`.
+
+[recordings-browser Installer](https://openstatic.org/projects/radio-pipe/recordings-browser.exe)
+You will likely see security warnings because it is a 7zip self-extracting archive.
+
+There is no uninstall, but you can right-click the shortcut, open its location, and delete the folder.
+
+### PHP RTL-SDR Manager
+![](https://openstatic.org/projects/radio-pipe/rtlsdr_manager.png)
+
+`php/rtl_sdr.php` is a single-page RTL-SDR control panel + JSON API. It starts and monitors `rtl_fm` pipelines, then routes audio into `radio-pipe` (recording), `ffmpeg` (live Icecast streaming), or both.
+
+It is designed for unattended radio capture setups where you need to tune, monitor, and recover multiple RTL-SDR pipelines from one page.
+
+#### What the page does
+
+* Discovers RTL-SDR dongles (index + serial aware)
+* Starts, stops, and retunes active device pipelines
+* Supports FM/WBFM/AM/USB/LSB/RAW modes
+* Supports optional DCS/CTCSS gating and bias-tee
+* Saves streaming server presets, recording upload presets, and reusable templates
+* Shows per-device logs in UI and supports log download
+* Tracks desired/running state and can auto-restart crashed pipelines with backoff
+
+#### Requirements for `rtl_sdr.php`
+
+* `rtl_fm` (`rtl-sdr` package)
+* `radio-pipe` in `PATH` (required for recording and stream conditioning)
+* `ffmpeg` in `PATH` (required when stream output is enabled)
+* `curl` in `PATH` (required only for After Record upload modes)
+
+#### Quick start
+
+1. Put `php/rtl_sdr.php` on a PHP-capable web server.
+2. (Recommended) create `php/config.php` and set your recordings directory:
+
+```php
+<?php
+$recordingsRoot = '/mnt/Media/recordings';
+```
+
+3. Open the page in your browser.
+
+Local test from this repo:
+
+```bash
+$ cd php
+$ ./server.sh
+# then open http://localhost:8000/rtl_sdr.php
+```
+
+#### Runtime files created next to `rtl_sdr.php`
+
+* `rtl_sdr_state.json` / `rtl_sdr_desired_state.json` - running and desired device state
+* `rtl_sdr_logs/` - per-device launch/runtime logs
+* `streaming_servers.json` - saved Icecast targets
+* `recording_servers.json` - saved upload targets for after-record actions
+* `rtl_sdr_templates.json` - saved templates/presets
+* `rtl_sdr_ui_settings.json` - saved per-device UI settings
+
+#### Watchdog and queued retunes (recommended)
+
+Retune actions are queued and applied by watchdog ticks. For unattended operation, install the included systemd timer/service:
+
+```bash
+$ sudo ./scripts/install_rtl_sdr_watchdog.sh --endpoint http://127.0.0.1/rtl_sdr.php
+```
+
+The installer now embeds the tick script into the installed target path (`--tick-dest`) and runs a preflight endpoint check before creating systemd units.
+
+By default, the watchdog posts `action=list` with `source=<service-name>` on each interval (override with `--action` and `--source`) to process queued retunes and periodic state cleanup.
