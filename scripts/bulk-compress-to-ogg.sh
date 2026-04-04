@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DIR="$1"   # directory passed as argument, default current directory
+DIR="${1:-$RADIOPIPE_RECORDINGS}"   # directory passed as argument, fallback to RADIOPIPE_RECORDINGS env var
 
 # This script can be setup as a cronjob to automatically convert your wav files into mp3
 # mp3, ogg, and wav are all supported by the php frontend
