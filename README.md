@@ -4,6 +4,8 @@ RadioPipe is a lightweight command-line recorder for Ham, CB, and GMRS radio str
 
 Built for unattended logging, RadioPipe stores WAV clips in date-based folders and names each file with the stream title and timestamp for quick browsing. You can run multiple instances to the same output directory without conflicts as long as each stream name is unique.
 
+Even though this project is coded in Java, the JVM is not a requirement! Its compiled using GraalVM's native-image and i have provided binaries for windows, linux, and arm64 based devices like the raspberry pi. However this comes with a small price, --input-devs and --output-devs will not work on linux. This is due to an incompatibility with the native libaries. However you can get around this easily by using the JVM version, or using --pipe-input / --pipe-output with arecord or aplay. 
+
 ## Feature Overview
 
 * Records only active audio (RMS gating) to avoid silence-heavy files
