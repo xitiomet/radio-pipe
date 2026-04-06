@@ -1311,6 +1311,7 @@ function extractMp3TagTextMetadata(string $fullPath, int $fileSize): array
 	$metadata = array(
 		'comment' => null,
 		'title' => null,
+		'artist' => null,
 	);
 
 	if ($fileSize <= 10) {
@@ -1376,9 +1377,14 @@ function extractMp3TagTextMetadata(string $fullPath, int $fileSize): array
 			if ($decodedTitle !== '') {
 				$metadata['title'] = $decodedTitle;
 			}
+		} elseif ($frameId === 'TPE1' && $metadata['artist'] === null) {
+			$decodedArtist = decodeId3TextFramePayload($framePayload);
+			if ($decodedArtist !== '') {
+				$metadata['artist'] = $decodedArtist;
+			}
 		}
 
-		if ($metadata['comment'] !== null && $metadata['title'] !== null) {
+		if ($metadata['comment'] !== null && $metadata['title'] !== null && $metadata['artist'] !== null) {
 			break;
 		}
 
@@ -1407,6 +1413,7 @@ function parseVorbisCommentPacketFields(string $packet): array
 	$metadata = array(
 		'comment' => null,
 		'title' => null,
+		'artist' => null,
 	);
 
 	$packetLength = strlen($packet);
@@ -1461,9 +1468,11 @@ function parseVorbisCommentPacketFields(string $packet): array
 			$metadata['comment'] = $value;
 		} elseif ($key === 'TITLE' && $metadata['title'] === null) {
 			$metadata['title'] = $value;
+		} elseif ($key === 'ARTIST' && $metadata['artist'] === null) {
+			$metadata['artist'] = $value;
 		}
 
-		if ($metadata['comment'] !== null && $metadata['title'] !== null) {
+		if ($metadata['comment'] !== null && $metadata['title'] !== null && $metadata['artist'] !== null) {
 			break;
 		}
 	}
@@ -1476,6 +1485,7 @@ function extractOggTagTextMetadata(string $fullPath, int $fileSize): array
 	$metadata = array(
 		'comment' => null,
 		'title' => null,
+		'artist' => null,
 	);
 
 	if ($fileSize <= 0) {
@@ -1527,6 +1537,14 @@ function extractOggTagTextMetadata(string $fullPath, int $fileSize): array
 		}
 	}
 
+	$fallbackArtistMatch = array();
+	if (preg_match('/ARTIST=([^\x00\r\n]+)/i', $data, $fallbackArtistMatch)) {
+		$fallbackArtist = normalizeMetadataTextValue((string)$fallbackArtistMatch[1]);
+		if ($fallbackArtist !== '') {
+			$metadata['artist'] = $fallbackArtist;
+		}
+	}
+
 	return $metadata;
 }
 
@@ -1535,6 +1553,7 @@ function emptySourceMetadata(): array
 	return array(
 		'comment' => null,
 		'title' => null,
+		'artist' => null,
 		'url' => null,
 	);
 }
@@ -1634,6 +1653,13 @@ function detectSourceMetadataForRecording(string $fullPath, int $fileSize, strin
 		$normalizedTitle = normalizeMetadataTextValue($tagMetadata['title']);
 		if ($normalizedTitle !== '') {
 			$metadata['title'] = $normalizedTitle;
+		}
+	}
+
+	if (isset($tagMetadata['artist']) && is_string($tagMetadata['artist'])) {
+		$normalizedArtist = normalizeMetadataTextValue($tagMetadata['artist']);
+		if ($normalizedArtist !== '') {
+			$metadata['artist'] = $normalizedArtist;
 		}
 	}
 
@@ -2047,6 +2073,74 @@ function estimateWavDurationSeconds(string $fullPath, int $fileSize): ?float
 	return null;
 }
 
+function recordingCachePath(string $fullPath): string
+{
+	return dirname($fullPath) . DIRECTORY_SEPARATOR . pathinfo($fullPath, PATHINFO_FILENAME) . '.json';
+}
+
+function readRecordingCache(string $fullPath, int $recordingMtime): ?array
+{
+	$cachePath = recordingCachePath($fullPath);
+	if (!is_file($cachePath)) {
+		return null;
+	}
+
+	$raw = @file_get_contents($cachePath);
+	if ($raw === false || $raw === '') {
+		return null;
+	}
+
+	$data = @json_decode($raw, true);
+	if (!is_array($data)) {
+		return null;
+	}
+
+	// Invalidate cache if the recording has been modified since the cache was written.
+	if (!isset($data['recording_mtime']) || (int)$data['recording_mtime'] !== $recordingMtime) {
+		return null;
+	}
+
+	// Invalidate cache if it was written before filesize/md5/artist fields were added.
+	if (!array_key_exists('filesize_bytes', $data) || !array_key_exists('md5_checksum', $data) || !array_key_exists('metadata_artist', $data)) {
+		return null;
+	}
+
+	// Invalidate cache if the file type has changed (e.g. .wav replaced by .mp3).
+	if (isset($data['content_type'])) {
+		$currentContentType = getRecordingMimeType(strtolower(pathinfo($fullPath, PATHINFO_EXTENSION)));
+		if ($data['content_type'] !== $currentContentType) {
+			return null;
+		}
+	}
+
+	return $data;
+}
+
+function writeRecordingCache(string $fullPath, int $recordingMtime, array $payload): void
+{
+	$cachePath = recordingCachePath($fullPath);
+	$payload['recording_mtime'] = $recordingMtime;
+
+	// Sanitize any non-finite float values (INF, NAN) which cause json_encode to fail.
+	foreach ($payload as $key => $value) {
+		if (is_float($value) && !is_finite($value)) {
+			$payload[$key] = null;
+		}
+	}
+
+	$jsonFlags = JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES;
+	if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
+		$jsonFlags |= JSON_INVALID_UTF8_SUBSTITUTE;
+	}
+
+	$encoded = json_encode($payload, $jsonFlags);
+	if ($encoded === false) {
+		return;
+	}
+
+	@file_put_contents($cachePath, $encoded, LOCK_EX);
+}
+
 function listRecordings(string $rootDirectory, array $allowedExtensions): array
 {
 	$realRoot = realpath($rootDirectory);
@@ -2080,8 +2174,34 @@ function listRecordings(string $rootDirectory, array $allowedExtensions): array
 		$modifiedAt = (int)$fileInfo->getMTime();
 		$parsedTimestamp = parseRecordingTimestamp($relativePath, $modifiedAt);
 		$sizeBytes = (int)$fileInfo->getSize();
-		$durationSeconds = estimateRecordingDurationSeconds($fullPath, $sizeBytes, $extension);
-		$sourceMetadata = detectSourceMetadataForRecording($fullPath, $sizeBytes, $extension);
+
+		$cache = readRecordingCache($fullPath, $modifiedAt);
+		if ($cache !== null) {
+			$durationSeconds = isset($cache['duration_seconds']) ? $cache['duration_seconds'] : null;
+			$sourceMetadata = array(
+				'comment' => isset($cache['metadata_comment']) ? $cache['metadata_comment'] : null,
+				'title'   => isset($cache['metadata_title'])   ? $cache['metadata_title']   : null,
+				'artist'  => isset($cache['metadata_artist'])  ? $cache['metadata_artist']  : null,
+				'url'     => isset($cache['source_url'])        ? $cache['source_url']        : null,
+			);
+		} else {
+			$durationSeconds = estimateRecordingDurationSeconds($fullPath, $sizeBytes, $extension);
+			$sourceMetadata = detectSourceMetadataForRecording($fullPath, $sizeBytes, $extension);
+			writeRecordingCache($fullPath, $modifiedAt, array(
+				'content_type'     => getRecordingMimeType($extension),
+				'filesize_bytes'   => $sizeBytes,
+				'md5_checksum'     => md5_file($fullPath),
+				'duration_seconds' => $durationSeconds,
+				'timestamp'        => $parsedTimestamp,
+				'timestamp_iso'    => date('Y-m-d H:i:s', $parsedTimestamp),
+				'date'             => date('Y-m-d', $parsedTimestamp),
+				'time_display'     => date('H:i:s', $parsedTimestamp),
+				'metadata_comment' => $sourceMetadata['comment'],
+				'metadata_title'   => $sourceMetadata['title'],
+				'metadata_artist'  => $sourceMetadata['artist'],
+				'source_url'       => $sourceMetadata['url'],
+			));
+		}
 
 		$items[] = array(
 			'path' => $relativePath,
@@ -2099,6 +2219,7 @@ function listRecordings(string $rootDirectory, array $allowedExtensions): array
 			'duration_display' => formatDuration($durationSeconds),
 			'metadata_comment' => $sourceMetadata['comment'],
 			'metadata_title' => $sourceMetadata['title'],
+			'metadata_artist' => $sourceMetadata['artist'],
 			'source_url' => $sourceMetadata['url'],
 		);
 	}
@@ -2550,6 +2671,12 @@ if ($ajaxAction === 'zip') {
 	zipRecordingsFiltered($recordingsRoot, $supportedRecordingExtensions, $nameFilter, $startTs, $endTs);
 }
 
+if ($ajaxAction === 'run_action') {
+	$requestedFile = isset($_GET['file']) ? (string)$_GET['file'] : '';
+	$actionIndex = isset($_GET['action']) && ctype_digit((string)$_GET['action']) ? (int)$_GET['action'] : -1;
+	runRecordingAction($recordingsRoot, $supportedRecordingExtensions, $requestedFile, $actionIndex);
+}
+
 function recordingMatchesNameFilter(array $recording, string $nameFilter): bool
 {
 	if ($nameFilter === '') {
@@ -2672,6 +2799,12 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 		$m3uLines[] = '#EXTINF:' . $durationSeconds . ',' . $title;
 		$m3uLines[] = $zipAudioPath;
 		$zip->addFile($resolvedPath, $zipAudioPath);
+
+		$jsonCachePath = recordingCachePath($resolvedPath);
+		if (is_file($jsonCachePath)) {
+			$zipJsonPath = 'audio/' . dirname($normalizedPath) . '/' . pathinfo($normalizedPath, PATHINFO_FILENAME) . '.json';
+			$zip->addFile($jsonCachePath, $zipJsonPath);
+		}
 	}
 
 	$zip->addFromString('recordings.m3u', implode("\n", $m3uLines) . "\n");
@@ -2697,6 +2830,38 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 	readfile($tmpFile);
 	@unlink($tmpFile);
 	exit;
+}
+
+function runRecordingAction(string $rootDirectory, array $allowedExtensions, string $requestedPath, int $actionIndex): void
+{
+	global $RECORDING_ACTIONS;
+
+	if (!isset($RECORDING_ACTIONS) || !is_array($RECORDING_ACTIONS) || $actionIndex < 0 || !isset($RECORDING_ACTIONS[$actionIndex])) {
+		sendJsonResponse(array('ok' => false, 'error' => 'Invalid action index.'), 400);
+	}
+
+	$action = $RECORDING_ACTIONS[$actionIndex];
+	if (!is_array($action) || !isset($action['command']) || !is_string($action['command']) || trim($action['command']) === '') {
+		sendJsonResponse(array('ok' => false, 'error' => 'Action command is not configured.'), 400);
+	}
+
+	$resolvedRecording = resolveRequestedRecordingFile($rootDirectory, $allowedExtensions, $requestedPath);
+	if ($resolvedRecording['ok'] !== true) {
+		sendJsonResponse(array('ok' => false, 'error' => (string)$resolvedRecording['message']), (int)$resolvedRecording['status_code']);
+	}
+
+	$fullPath = (string)$resolvedRecording['full_path'];
+	$command = str_replace('%s', escapeshellarg($fullPath), (string)$action['command']);
+	$output = array();
+	$returnCode = 0;
+	exec($command . ' 2>&1', $output, $returnCode);
+
+	sendJsonResponse(array(
+		'ok' => true,
+		'label' => isset($action['label']) ? (string)$action['label'] : '',
+		'return_code' => $returnCode,
+		'output' => implode("\n", $output),
+	), 200);
 }
 
 ?><!DOCTYPE html>
@@ -2900,6 +3065,13 @@ function zipRecordingsFiltered(string $rootDirectory, array $allowedExtensions, 
 		width: 92px;
 		text-align: center;
 		white-space: nowrap;
+	}
+
+	.recording-actions {
+		text-align: center;
+		white-space: nowrap;
+		padding-left: 6px;
+		padding-right: 6px;
 	}
 
 	.recording-name {
@@ -3695,6 +3867,7 @@ var lastStatusMessage = '';
 var lastStatusIsError = false;
 var playerSkipAmountSeconds = 10;
 var recordingsAuthHash = <?=json_encode(getRecordingsAuthenticatedHash(), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT)?>;
+var recordingActions = <?=json_encode(isset($RECORDING_ACTIONS) && is_array($RECORDING_ACTIONS) ? $RECORDING_ACTIONS : array(), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT)?>;
 
 function appendRecordingsAuthHash(url)
 {
@@ -4237,6 +4410,27 @@ function playAudioElement(audioPlayer)
 		playPromise.catch(function () {
 		});
 	}
+}
+
+function runRecordingAction(actionIndex, recordingPath, event)
+{
+	if (event) {
+		event.stopPropagation();
+	}
+
+	var url = appendRecordingsAuthHash('?ajax=run_action&action=' + encodeURIComponent(actionIndex) + '&file=' + encodeURIComponent(recordingPath));
+	fetch(url)
+		.then(function (response) { return response.json(); })
+		.then(function (data) {
+			if (data.ok) {
+				refreshRecordings(true);
+			} else {
+				setStatus('Action failed: ' + (data.error || 'Unknown error.'), true);
+			}
+		})
+		.catch(function () {
+			setStatus('Action request failed.', true);
+		});
 }
 
 function onDownloadSelectedButtonClicked()
@@ -5084,6 +5278,9 @@ function renderRecordings(groups)
 
 		var table = document.createElement('table');
 		table.className = 'recording-table';
+		if (recordingActions.length > 0) {
+			table.style.tableLayout = 'auto';
+		}
 
 		var tableHead = document.createElement('thead');
 		var headRow = document.createElement('tr');
@@ -5122,6 +5319,12 @@ function renderRecordings(groups)
 		headRow.appendChild(sizeHead);
 		headRow.appendChild(contentTypeHead);
 		headRow.appendChild(durationHead);
+		if (recordingActions.length > 0) {
+			var actionsHead = document.createElement('th');
+			actionsHead.className = 'recording-actions';
+			actionsHead.textContent = 'Actions';
+			headRow.appendChild(actionsHead);
+		}
 		headRow.appendChild(downloadHead);
 		tableHead.appendChild(headRow);
 		table.appendChild(tableHead);
@@ -5183,6 +5386,30 @@ function renderRecordings(groups)
 			row.appendChild(sizeCell);
 			row.appendChild(contentTypeCell);
 			row.appendChild(durationCell);
+			if (recordingActions.length > 0) {
+				var actionsCell = document.createElement('td');
+				actionsCell.className = 'recording-actions';
+				for (var actionIdx = 0; actionIdx < recordingActions.length; actionIdx++) {
+					if (actionIdx > 0) {
+						actionsCell.appendChild(document.createTextNode(' | '));
+					}
+					var actionLink = document.createElement('a');
+					actionLink.href = '#';
+					actionLink.textContent = String(recordingActions[actionIdx].label || '');
+					actionLink.onclick = (function (idx, path, confirmation) {
+						return function (event) {
+							if (confirmation && !window.confirm(confirmation)) {
+								event.stopPropagation();
+								return false;
+							}
+							runRecordingAction(idx, path, event);
+							return false;
+						};
+					})(actionIdx, recording.path, recordingActions[actionIdx].confirmation || '');
+					actionsCell.appendChild(actionLink);
+				}
+				row.appendChild(actionsCell);
+			}
 			row.appendChild(downloadCell);
 			tableBody.appendChild(row);
 		}

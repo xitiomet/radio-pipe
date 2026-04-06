@@ -3478,8 +3478,8 @@ function normalize_config(array $input, string $defaultOutputDir): array
 	}
 
 	$frequency = trim((string)($input['frequency'] ?? ''));
-	if (!preg_match('/^[0-9]+(?:\.[0-9]+)?[kKmMgG]?(?:[\s\-][0-9]+(?:\.[0-9]+)?[kKmMgG]?)*$/', $frequency)) {
-		throw new RuntimeException('Frequency format is invalid. Examples: 146.520M, 146.435M 146.560M, 146.400M-146.600M');
+	if (!preg_match('/^[0-9]+(?:\.[0-9]+)?[kKmMgG]?(?::[0-9]+(?:\.[0-9]+)?[kKmMgG]?){0,2}(?:[\s\-][0-9]+(?:\.[0-9]+)?[kKmMgG]?(?::[0-9]+(?:\.[0-9]+)?[kKmMgG]?){0,2})*$/', $frequency)) {
+		throw new RuntimeException('Frequency format is invalid. Examples: 146.520M, 146.435M 146.560M, 146.400M-146.600M, 118M:137M:25k');
 	}
 	$streamFrequencyLabel = summarize_frequency_for_stream_label($frequency);
 
@@ -11616,7 +11616,7 @@ function renderDeviceList()
 						'<div><label>Stream Name</label><input type="text" class="field-stream-name" value="' + escapeHtml(String(config.streamName || '')) + '" placeholder="Optional custom stream name"></div>' +
 					'</div>' +
 					'<div class="form-row">' +
-						'<div><label>Frequency</label><input type="text" class="field-frequency" value="' + escapeHtml(config.frequency || '') + '" placeholder="146.520M or 146.400M-146.600M or 146.435M 146.560M"></div>' +
+						'<div><label>Frequency</label><input type="text" class="field-frequency" value="' + escapeHtml(config.frequency || '') + '" placeholder="146.520M or 118M:137M:25k or 146.435M 146.560M"></div>' +
 						'<div><label>Mode</label><select class="field-mode">' +
 							'<option value="fm">FM</option>' +
 							'<option value="wbfm">WBFM</option>' +
