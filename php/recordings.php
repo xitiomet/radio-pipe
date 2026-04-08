@@ -3346,6 +3346,7 @@ function runRecordingAction(string $rootDirectory, array $allowedExtensions, str
 		justify-content: space-between;
 		gap: 10px;
 		width: 100%;
+		min-height: 34px;
 	}
 
 	.recordings-controls-header-actions {
@@ -3353,6 +3354,47 @@ function runRecordingAction(string $rootDirectory, array $allowedExtensions, str
 		align-items: center;
 		gap: 8px;
 		margin-left: auto;
+		flex-shrink: 0;
+	}
+
+	.collapsed-filter-badge {
+		display: none;
+		align-items: center;
+		gap: 6px;
+		font-size: 12px;
+		color: #b0c4de;
+		background: #2a2a2a;
+		border: 1px solid #444;
+		border-radius: 4px;
+		padding: 3px 8px;
+		max-width: 50%;
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+		min-width: 0;
+		flex-shrink: 1;
+	}
+
+	body.theme-light .collapsed-filter-badge {
+		background: #e8eef5;
+		border-color: #b9c4d1;
+		color: #3a5268;
+	}
+
+	.collapsed-filter-badge.is-visible {
+		display: flex;
+	}
+
+	.collapsed-filter-badge-label {
+		font-weight: bold;
+		flex-shrink: 0;
+	}
+
+	.collapsed-filter-badge-value {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		min-width: 0;
 	}
 
 	.recordings-controls-title {
@@ -3422,20 +3464,81 @@ function runRecordingAction(string $rootDirectory, array $allowedExtensions, str
 		white-space: nowrap;
 	}
 
-	.recordings-filter-input {
+	.recordings-filter-input-wrap {
 		flex: 1 1 280px;
+		position: relative;
+		display: flex;
+		align-items: center;
+	}
+
+	.recordings-filter-input {
+		width: 100%;
 		min-height: 34px;
-		padding: 6px 8px;
+		padding: 6px 30px 6px 8px;
 		border: 1px solid #4a4a4a;
 		border-radius: 4px;
 		background-color: #141414;
 		color: #efefef;
+		box-sizing: border-box;
 	}
 
 	body.theme-light .recordings-filter-input {
 		border-color: #b9c4d1;
 		background-color: #ffffff;
 		color: #1f2a34;
+	}
+
+	.filter-clear-button {
+		position: absolute;
+		right: 4px;
+		top: 50%;
+		transform: translateY(-50%);
+		background: none;
+		border: none;
+		color: #999;
+		cursor: pointer;
+		font-size: 16px;
+		line-height: 1;
+		padding: 2px 4px;
+		display: none;
+	}
+
+	.filter-clear-button.is-visible {
+		display: block;
+	}
+
+	.filter-clear-button:hover {
+		color: #fff;
+	}
+
+	body.theme-light .filter-clear-button:hover {
+		color: #333;
+	}
+
+	.recording-filter-icon {
+		display: inline-block;
+		vertical-align: middle;
+		width: 14px;
+		height: 14px;
+		margin-left: 5px;
+		cursor: pointer;
+		opacity: 0;
+		transition: opacity 0.15s;
+		flex-shrink: 0;
+		color: #888;
+	}
+
+	.recording-row:hover .recording-filter-icon {
+		opacity: 0.7;
+	}
+
+	.recording-filter-icon:hover {
+		opacity: 1 !important;
+		color: #4fc3f7;
+	}
+
+	body.theme-light .recording-filter-icon:hover {
+		color: #0d6efd;
 	}
 
 	.autoplay-new-label {
@@ -3747,6 +3850,90 @@ function runRecordingAction(string $rootDirectory, array $allowedExtensions, str
 			min-width: 500px;
 		}
 	}
+
+	.confirm-modal-overlay {
+		display: none;
+		position: fixed;
+		top: 0;
+		left: 0;
+		width: 100%;
+		height: 100%;
+		background: rgba(0, 0, 0, 0.55);
+		z-index: 10000;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.confirm-modal-overlay.is-visible {
+		display: flex;
+	}
+
+	.confirm-modal-box {
+		background: #1e1e1e;
+		border: 1px solid #444;
+		border-radius: 8px;
+		padding: 24px 28px 20px;
+		max-width: 420px;
+		width: 90%;
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+		color: #d4d4d4;
+		font-size: 14px;
+		line-height: 1.5;
+	}
+
+	body.theme-light .confirm-modal-box {
+		background: #fff;
+		border-color: #ccc;
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+		color: #2d3742;
+	}
+
+	.confirm-modal-message {
+		margin: 0 0 18px;
+		word-wrap: break-word;
+	}
+
+	.confirm-modal-buttons {
+		display: flex;
+		justify-content: flex-end;
+		gap: 10px;
+	}
+
+	.confirm-modal-button {
+		padding: 7px 18px;
+		border-radius: 4px;
+		border: 1px solid #555;
+		background: #2a2a2a;
+		color: #d4d4d4;
+		font-size: 13px;
+		cursor: pointer;
+		line-height: 1.4;
+	}
+
+	body.theme-light .confirm-modal-button {
+		background: #f0f0f0;
+		border-color: #bbb;
+		color: #2d3742;
+	}
+
+	.confirm-modal-button:hover {
+		background: #3a3a3a;
+	}
+
+	body.theme-light .confirm-modal-button:hover {
+		background: #ddd;
+	}
+
+	.confirm-modal-button.is-primary {
+		background: #0d6efd;
+		border-color: #0d6efd;
+		color: #fff;
+	}
+
+	.confirm-modal-button.is-primary:hover {
+		background: #0b5ed7;
+		border-color: #0b5ed7;
+	}
 </style>
 
 <h2><?=$PAGE_TITLE?></h2>
@@ -3795,7 +3982,17 @@ function runRecordingAction(string $rootDirectory, array $allowedExtensions, str
 			<div class="recordings-controls" id="recordingsControls">
 				<div class="recordings-controls-header">
 					<span class="recordings-controls-title">Filters and Controls</span>
+					<div class="collapsed-filter-badge" id="collapsedFilterBadge">
+						<span class="collapsed-filter-badge-label">Filter:</span>
+						<span class="collapsed-filter-badge-value" id="collapsedFilterBadgeValue"></span>
+					</div>
 					<div class="recordings-controls-header-actions">
+						<button type="button" id="headerClearFilterButton" class="refresh-button header-icon-button" onclick="onFilterClearButtonClicked()" aria-label="Clear filter" title="Clear filter" style="display: none;">
+							<svg class="header-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<line x1="18" y1="6" x2="6" y2="18"></line>
+								<line x1="6" y1="6" x2="18" y2="18"></line>
+							</svg>
+						</button>
 						<button type="button" class="refresh-button header-icon-button" onclick="refreshRecordings(true)" aria-label="Refresh now" title="Refresh now">
 							<svg class="header-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
 								<polyline points="23 4 23 10 17 10"></polyline>
@@ -3832,7 +4029,10 @@ function runRecordingAction(string $rootDirectory, array $allowedExtensions, str
 				<div class="recordings-controls-body" id="recordingsControlsBody">
 					<div class="recordings-controls-row">
 						<label for="recordingsFilterInput" class="recordings-filter-label">Filter:</label>
-						<input type="text" id="recordingsFilterInput" class="recordings-filter-input" placeholder="Type to filter name, comment, or title..." autocomplete="off" />
+						<div class="recordings-filter-input-wrap">
+							<input type="text" id="recordingsFilterInput" class="recordings-filter-input" placeholder="Type to filter name, comment, or title..." autocomplete="off" />
+							<button type="button" id="filterClearButton" class="filter-clear-button" aria-label="Clear filter" title="Clear filter">&times;</button>
+						</div>
 						<div class="checkbox-stack">
 							<label class="autoplay-new-label" for="autoPlayNewCheckbox"><input type="checkbox" id="autoPlayNewCheckbox" /> Auto play new recordings</label>
 							<label class="autoplay-new-label" for="keepPlayingChronologicallyCheckbox"><input type="checkbox" id="keepPlayingChronologicallyCheckbox" /> Keep playing chronologically</label>
@@ -3932,6 +4132,7 @@ function applyFiltersVisibility(collapsed)
 	controlsBody.setAttribute('aria-hidden', shouldCollapse ? 'true' : 'false');
 	toggleButton.textContent = shouldCollapse ? 'Show Filters' : 'Hide Filters';
 	toggleButton.setAttribute('aria-expanded', shouldCollapse ? 'false' : 'true');
+	updateCollapsedFilterBadge();
 	adjustRecordingsListHeight();
 }
 
@@ -4410,6 +4611,130 @@ function playAudioElement(audioPlayer)
 		playPromise.catch(function () {
 		});
 	}
+}
+
+function setFilterToName(name)
+{
+	var filterInput = document.getElementById('recordingsFilterInput');
+	if (!filterInput) {
+		return;
+	}
+
+	filterInput.value = name;
+	updateFilterClearButton();
+	onFilterInputChanged();
+	filterInput.focus();
+}
+
+function updateFilterClearButton()
+{
+	var filterInput = document.getElementById('recordingsFilterInput');
+	var clearButton = document.getElementById('filterClearButton');
+	var headerClearButton = document.getElementById('headerClearFilterButton');
+	var hasValue = !!(filterInput && filterInput.value.length > 0);
+
+	if (clearButton) {
+		clearButton.classList.toggle('is-visible', hasValue);
+	}
+
+	if (headerClearButton) {
+		headerClearButton.style.display = hasValue ? 'inline-flex' : 'none';
+	}
+
+	updateCollapsedFilterBadge();
+}
+
+function updateCollapsedFilterBadge()
+{
+	var controlsWrap = document.getElementById('recordingsControls');
+	var badge = document.getElementById('collapsedFilterBadge');
+	var badgeValue = document.getElementById('collapsedFilterBadgeValue');
+	var filterInput = document.getElementById('recordingsFilterInput');
+	if (!badge || !badgeValue || !controlsWrap || !filterInput) {
+		return;
+	}
+
+	var isCollapsed = controlsWrap.classList.contains('is-collapsed');
+	var filterValue = filterInput.value.trim();
+	var shouldShow = isCollapsed && filterValue.length > 0;
+
+	badge.classList.toggle('is-visible', shouldShow);
+	badgeValue.textContent = filterValue;
+}
+
+function onFilterClearButtonClicked()
+{
+	var filterInput = document.getElementById('recordingsFilterInput');
+	if (!filterInput) {
+		return;
+	}
+
+	filterInput.value = '';
+	updateFilterClearButton();
+	onFilterInputChanged();
+	filterInput.focus();
+}
+
+var confirmModalResolve = null;
+
+function showConfirmModal(message)
+{
+	return new Promise(function (resolve) {
+		var overlay = document.getElementById('confirmModalOverlay');
+		var messageEl = document.getElementById('confirmModalMessage');
+		var okButton = document.getElementById('confirmModalOkButton');
+		var cancelButton = document.getElementById('confirmModalCancelButton');
+		if (!overlay || !messageEl || !okButton || !cancelButton) {
+			resolve(false);
+			return;
+		}
+
+		if (confirmModalResolve) {
+			confirmModalResolve(false);
+			confirmModalResolve = null;
+		}
+
+		messageEl.textContent = message;
+		overlay.classList.add('is-visible');
+		okButton.focus();
+		confirmModalResolve = resolve;
+
+		function cleanup() {
+			overlay.classList.remove('is-visible');
+			okButton.removeEventListener('click', onOk);
+			cancelButton.removeEventListener('click', onCancel);
+			overlay.removeEventListener('click', onOverlayClick);
+			document.removeEventListener('keydown', onKeyDown);
+			confirmModalResolve = null;
+		}
+
+		function onOk() {
+			cleanup();
+			resolve(true);
+		}
+
+		function onCancel() {
+			cleanup();
+			resolve(false);
+		}
+
+		function onOverlayClick(e) {
+			if (e.target === overlay) {
+				onCancel();
+			}
+		}
+
+		function onKeyDown(e) {
+			if (e.key === 'Escape') {
+				onCancel();
+			}
+		}
+
+		okButton.addEventListener('click', onOk);
+		cancelButton.addEventListener('click', onCancel);
+		overlay.addEventListener('click', onOverlayClick);
+		document.addEventListener('keydown', onKeyDown);
+	});
 }
 
 function runRecordingAction(actionIndex, recordingPath, event)
@@ -5352,7 +5677,30 @@ function renderRecordings(groups)
 
 			var nameCell = document.createElement('td');
 			nameCell.className = 'recording-name';
-			nameCell.textContent = recording.name_pretty;
+			var nameText = document.createElement('span');
+			nameText.textContent = recording.name_pretty;
+			nameCell.appendChild(nameText);
+			var filterIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+			filterIcon.setAttribute('class', 'recording-filter-icon');
+			filterIcon.setAttribute('viewBox', '0 0 24 24');
+			filterIcon.setAttribute('fill', 'none');
+			filterIcon.setAttribute('stroke', 'currentColor');
+			filterIcon.setAttribute('stroke-width', '2');
+			filterIcon.setAttribute('stroke-linecap', 'round');
+			filterIcon.setAttribute('stroke-linejoin', 'round');
+			filterIcon.setAttribute('aria-hidden', 'true');
+			filterIcon.setAttribute('focusable', 'false');
+			var filterPolygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+			filterPolygon.setAttribute('points', '22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3');
+			filterIcon.appendChild(filterPolygon);
+			filterIcon.setAttribute('title', 'Filter by: ' + recording.name_pretty);
+			filterIcon.onclick = (function (name) {
+				return function (event) {
+					event.stopPropagation();
+					setFilterToName(name);
+				};
+			})(recording.name_pretty);
+			nameCell.appendChild(filterIcon);
 			nameCell.title = recording.name;
 
 			var durationCell = document.createElement('td');
@@ -5398,11 +5746,17 @@ function renderRecordings(groups)
 					actionLink.textContent = String(recordingActions[actionIdx].label || '');
 					actionLink.onclick = (function (idx, path, confirmation) {
 						return function (event) {
-							if (confirmation && !window.confirm(confirmation)) {
-								event.stopPropagation();
-								return false;
+							event.preventDefault();
+							event.stopPropagation();
+							if (confirmation) {
+								showConfirmModal(confirmation).then(function (confirmed) {
+									if (confirmed) {
+										runRecordingAction(idx, path);
+									}
+								});
+							} else {
+								runRecordingAction(idx, path);
 							}
-							runRecordingAction(idx, path, event);
 							return false;
 						};
 					})(actionIdx, recording.path, recordingActions[actionIdx].confirmation || '');
@@ -5563,7 +5917,15 @@ function startRecordingsPage()
 	initPlaybackOptionPreferences();
 	var filterInput = document.getElementById('recordingsFilterInput');
 	if (filterInput) {
-		filterInput.addEventListener('input', onFilterInputChanged);
+		filterInput.addEventListener('input', function () {
+			updateFilterClearButton();
+			onFilterInputChanged();
+		});
+	}
+
+	var filterClearButton = document.getElementById('filterClearButton');
+	if (filterClearButton) {
+		filterClearButton.addEventListener('click', onFilterClearButtonClicked);
 	}
 
 	var dateStartInput = document.getElementById('recordingsFilterStart');
@@ -5624,6 +5986,16 @@ window.addEventListener('resize', function () {
 	adjustRecordingsListHeight();
 });
 </script>
+
+<div class="confirm-modal-overlay" id="confirmModalOverlay" role="dialog" aria-modal="true" aria-labelledby="confirmModalMessage">
+	<div class="confirm-modal-box">
+		<div class="confirm-modal-message" id="confirmModalMessage"></div>
+		<div class="confirm-modal-buttons">
+			<button type="button" class="confirm-modal-button" id="confirmModalCancelButton">Cancel</button>
+			<button type="button" class="confirm-modal-button is-primary" id="confirmModalOkButton">OK</button>
+		</div>
+	</div>
+</div>
 
 </div>
 </body>
