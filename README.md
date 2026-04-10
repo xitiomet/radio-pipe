@@ -203,6 +203,7 @@ RadioPipe uses one internal processing path regardless of whether audio comes fr
 5. If the gate is open, audio is counted as active sound and starts or continues a clip.
 6. If a clip is already open and the gate closes, RadioPipe keeps appending the non-passing tail until the configured silence timeout expires, then closes the clip.
 7. Optional post-gate processing is applied before output when configured:
+  * `--deemphasis` applies FM de-emphasis to compensate for transmitter pre-emphasis (runs first)
   * `--voice-filter` applies a voice band-pass (`300-3400 Hz`) to passing audio
   * `--gain <dB>` adds fixed gain (or attenuation)
   * `--auto-gain` adds automatic boost toward a target loudness
@@ -369,7 +370,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * **Output modes**: file recording with `-o`, clip/WAV stdout with `--stdout`, raw stdout with `--stdout-raw`, continuous padded raw stream with `--stdout-pad`
 * **Audio/clip parameters**: `-t`, `-s`, `-r`, `-c`, `-b`
 * **Tone/code gating**: `--dcs`, `--ctcss`, `--gate-hold`
-* **Post-gate processing**: `--voice-filter`, `--gain`, `--auto-gain`
+* **Post-gate processing**: `--deemphasis`, `--voice-filter`, `--gain`, `--auto-gain`
 * **Naming/automation**: `-n`, `-x`
 * **WebSocket API**: `--api-websocket`
 
@@ -412,6 +413,7 @@ Use this section as a full reference. If you are skimming, start with the quick 
 * --dcs <CODE> – optional DCS gate code (octal, example `023`); clip audio only while matching DCS is detected
 * --ctcss <HZ> – optional CTCSS gate tone in Hz (example `100.0`); clip audio only while matching tone is detected
 * --gate-hold <SECONDS> – additional grace time to keep DCS/CTCSS gates open after decode drops (default `0`)
+* --deemphasis [TAU] – apply FM de-emphasis filter to reduce high-frequency hiss from FM demodulation (default `75` µs for Americas/narrowband; use `50` for Europe/Asia)
 * --voice-filter – apply post-gate voice band-pass filtering (`300-3400 Hz`) before gain/output
 * --gain <DB> – fixed post-gate gain in dB before recording/stdout (range `-60` to `+60`, default `0`)
 * --auto-gain – enable automatic post-gate boost toward target level (applies after gates, before recording/stdout)
@@ -450,6 +452,8 @@ When using both --dcs and --ctcss, both gates must match for clips to open.
 `--gain` applies fixed post-gate gain (or attenuation) after gate decisions and before recording/stdout output.
 
 `--auto-gain` adds automatic post-gate boost on passing audio frames; it can be combined with `--gain`.
+
+`--deemphasis` applies a standard FM de-emphasis curve (single-pole IIR low-pass) to passing audio frames. FM transmitters boost high frequencies (pre-emphasis) before transmission; de-emphasis reverses this and dramatically reduces high-frequency hiss from RTL-SDR or other FM receivers. The optional argument is the time constant in µs: `75` (default, Americas and narrowband land-mobile radio) or `50` (Europe, Asia). De-emphasis runs before the voice filter and gain stages. Note: if your demodulator already applies de-emphasis (e.g. `rtl_fm -E deemp`), you may not need this option, or you can use both for additional noise reduction.
 
 `--voice-filter` applies a post-gate voice-focused band-pass (`300-3400 Hz`) to passing audio frames before gain/output.
 
