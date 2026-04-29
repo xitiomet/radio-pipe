@@ -438,6 +438,11 @@ public class StreamRecorder {
     }
 
     public void setGainControl(double gainDb, boolean autoGainEnabled) {
+        setOutputGainDb(gainDb);
+        setAutoGainEnabled(autoGainEnabled);
+    }
+
+    public void setOutputGainDb(double gainDb) {
         if (!Double.isFinite(gainDb)) {
             throw new IllegalArgumentException("gain must be a finite numeric value in dB");
         }
@@ -445,8 +450,27 @@ public class StreamRecorder {
             throw new IllegalArgumentException("gain must be between -60 and +60 dB");
         }
         this.outputGainDb = gainDb;
+    }
+
+    public void setAutoGainEnabled(boolean autoGainEnabled) {
         this.autoGainEnabled = autoGainEnabled;
         this.smoothedAutoGainDb = 0.0;
+    }
+
+    public double getOutputGainDb() {
+        return this.outputGainDb;
+    }
+
+    public boolean isAutoGainEnabled() {
+        return this.autoGainEnabled;
+    }
+
+    public boolean isVoiceFilterEnabled() {
+        return this.voiceFilterEnabled;
+    }
+
+    public boolean isDeemphasisEnabled() {
+        return this.deemphasisEnabled;
     }
 
     public void setVoiceFilterEnabled(boolean voiceFilterEnabled) {
@@ -456,6 +480,10 @@ public class StreamRecorder {
     public void setDeemphasis(boolean enabled, double tauSeconds) {
         this.deemphasisEnabled = enabled;
         this.deemphasisTau = (tauSeconds > 0.0) ? tauSeconds : DeemphasisFilter.TAU_75_US;
+    }
+
+    public void setDeemphasisEnabled(boolean enabled) {
+        this.deemphasisEnabled = enabled;
     }
 
     private boolean canWriteRecordings() {

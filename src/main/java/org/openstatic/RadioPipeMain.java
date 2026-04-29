@@ -1,6 +1,7 @@
 package org.openstatic;
 
 import org.apache.commons.cli.*;
+import org.json.JSONObject;
 import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.DataLine;
@@ -609,6 +610,14 @@ public class RadioPipeMain
             recorder.setPipeOutputs(pipeOutputTargets);
             recorder.setPipeInput(usePipeInput ? pipeInputCommand : null, pipeInputRaw, pipeInputRawFormat);
             recorder.setApiWebSocketServer(apiWebSocketServer);
+            if (apiWebSocketServer != null) {
+                final StreamRecorder commandRecorder = recorder;
+                final ApiWebSocketServer commandApiWebSocketServer = apiWebSocketServer;
+                final double commandDeemphasisTau = deemphasisTau;
+                apiWebSocketServer.setCommandHandler((command, payload) -> {
+                    handleWebSocketCommand(commandRecorder, commandApiWebSocketServer, command, payload, commandDeemphasisTau);
+                });
+            }
             final ApiWebSocketServer shutdownApiWebSocketServer = apiWebSocketServer;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 recorder.stop();
@@ -872,6 +881,118 @@ public class RadioPipeMain
     private static boolean isBlank(String value)
     {
         return value == null || value.trim().isEmpty();
+    }
+
+    private static void handleWebSocketCommand(StreamRecorder recorder,
+                                               ApiWebSocketServer apiWebSocketServer,
+                                               String command,
+                                               JSONObject payload,
+                                               double defaultDeemphasisTau)
+    {
+        if (command == null || recorder == null || apiWebSocketServer == null) {
+            return;
+        }
+
+        try {
+            switch (command) {
+                case "setAutoGain": {
+                    boolean enabled = requireBoolean(payload, "value", command);
+                    recorder.setAutoGainEnabled(enabled);
+                    apiWebSocketServer.publishEvent("commandResponse",
+                            "command", command,
+                            "value", enabled);
+                    break;
+                }
+                case "setVoiceFilter": {
+                    boolean enabled = requireBoolean(payload, "value", command);
+                    recorder.setVoiceFilterEnabled(enabled);
+                    apiWebSocketServer.publishEvent("commandResponse",
+                            "command", command,
+                            "value", enabled);
+                    break;
+                }
+                case "setDeemphasis": {
+                    boolean enabled = requireBoolean(payload, "value", command);
+                    double tauSeconds = defaultDeemphasisTau;
+                    boolean tauProvided = payload.has("tau") && !payload.isNull("tau");
+                    if (tauProvided) {
+                        double tauMicros = requireDouble(payload, "tau", command);
+                        if (!(tauMicros > 0.0 && tauMicros < 1000.0)) {
+                            throw new IllegalArgumentException("tau must be between 0 and 1000 µs");
+                        }
+                        tauSeconds = tauMicros * 1.0e-6;
+                    }
+                    recorder.setDeemphasis(enabled, tauSeconds);
+                    if (tauProvided) {
+                        apiWebSocketServer.publishEvent("commandResponse",
+                                "command", command,
+                                "value", enabled,
+                                "tau", Math.round(tauSeconds * 1.0e6 * 1000.0) / 1000.0);
+                    } else {
+                        apiWebSocketServer.publishEvent("commandResponse",
+                                "command", command,
+                                "value", enabled);
+                    }
+                    break;
+                }
+                case "setGain": {
+                    double gainDb = requireDouble(payload, "value", command);
+                    recorder.setOutputGainDb(gainDb);
+                    apiWebSocketServer.publishEvent("commandResponse",
+                            "command", command,
+                            "value", gainDb);
+                    break;
+                }
+                default:
+                    apiWebSocketServer.publishEvent("commandResponse",
+                            "command", command,
+                            "error", "unknown command");
+                    break;
+            }
+        } catch (IllegalArgumentException iae) {
+            apiWebSocketServer.publishEvent("commandResponse",
+                    "command", command,
+                    "error", iae.getMessage());
+        }
+    }
+
+    private static boolean requireBoolean(JSONObject payload, String key, String command)
+    {
+        if (!payload.has(key) || payload.isNull(key)) {
+            throw new IllegalArgumentException(command + " requires a boolean \"" + key + "\" field");
+        }
+        Object raw = payload.get(key);
+        if (raw instanceof Boolean) {
+            return (Boolean) raw;
+        }
+        if (raw instanceof String) {
+            String s = ((String) raw).trim();
+            if ("true".equalsIgnoreCase(s)) return true;
+            if ("false".equalsIgnoreCase(s)) return false;
+        }
+        if (raw instanceof Number) {
+            return ((Number) raw).doubleValue() != 0.0;
+        }
+        throw new IllegalArgumentException(command + " requires a boolean \"" + key + "\" field");
+    }
+
+    private static double requireDouble(JSONObject payload, String key, String command)
+    {
+        if (!payload.has(key) || payload.isNull(key)) {
+            throw new IllegalArgumentException(command + " requires a numeric \"" + key + "\" field");
+        }
+        Object raw = payload.get(key);
+        if (raw instanceof Number) {
+            return ((Number) raw).doubleValue();
+        }
+        if (raw instanceof String) {
+            try {
+                return Double.parseDouble(((String) raw).trim());
+            } catch (NumberFormatException nfe) {
+                // fall through
+            }
+        }
+        throw new IllegalArgumentException(command + " requires a numeric \"" + key + "\" field");
     }
 
     private static List<StreamRecorder.PipeOutputTarget> parsePipeOutputTargetsInOrder(String[] args,

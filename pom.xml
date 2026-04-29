@@ -55,6 +55,11 @@
       <version>1.9.5.4</version>
       <scope>compile</scope>
   </dependency>
+    <dependency>
+      <groupId>org.json</groupId>
+      <artifactId>json</artifactId>
+      <version>20251224</version>
+    </dependency>
     <!--
     MP3 decoding libraries (mp3spi/tritonus) are useful when the JVM does not
     already contain an MP3 provider.  They were removed from the POM because

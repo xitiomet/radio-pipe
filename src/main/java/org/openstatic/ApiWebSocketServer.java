@@ -3,15 +3,35 @@ package org.openstatic;
 import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.lang.reflect.Array;
 import java.net.InetSocketAddress;
 
 public final class ApiWebSocketServer extends WebSocketServer {
 
+    @FunctionalInterface
+    public interface CommandHandler {
+        /**
+         * Handle a command received from a websocket client.
+         *
+         * @param command the value of the "command" field
+         * @param payload the full parsed JSON payload (never null)
+         */
+        void handle(String command, JSONObject payload);
+    }
+
+    private volatile CommandHandler commandHandler;
+
     public ApiWebSocketServer(InetSocketAddress bindAddress) {
         super(bindAddress);
         setReuseAddr(true);
+    }
+
+    public void setCommandHandler(CommandHandler commandHandler) {
+        this.commandHandler = commandHandler;
     }
 
     @Override
@@ -24,6 +44,30 @@ public final class ApiWebSocketServer extends WebSocketServer {
 
     @Override
     public void onMessage(WebSocket connection, String message) {
+        if (message == null) {
+            return;
+        }
+
+        JSONObject payload;
+        try {
+            payload = new JSONObject(message);
+        } catch (JSONException jsonException) {
+            return;
+        }
+
+        String command = payload.optString("command", null);
+        if (command == null || command.isEmpty()) {
+            return;
+        }
+
+        CommandHandler handler = this.commandHandler;
+        if (handler != null) {
+            try {
+                handler.handle(command, payload);
+            } catch (Exception handlerException) {
+                System.err.println("websocket command handler error: " + handlerException.getMessage());
+            }
+        }
     }
 
     @Override
@@ -111,6 +155,11 @@ public final class ApiWebSocketServer extends WebSocketServer {
     private static void appendJsonValue(StringBuilder json, Object valueObj) {
         if (valueObj == null) {
             json.append("null");
+            return;
+        }
+
+        if (valueObj instanceof JSONObject || valueObj instanceof JSONArray) {
+            json.append(valueObj.toString());
             return;
         }
 
