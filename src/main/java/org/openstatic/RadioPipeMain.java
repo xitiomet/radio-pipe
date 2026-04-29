@@ -15,6 +15,8 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 
 public class RadioPipeMain
 {
@@ -83,15 +85,15 @@ public class RadioPipeMain
         options.addOption(Option.builder().longOpt("pipe-output-raw")
             .desc("Write gated audio to --pipe-output commands as raw PCM bytes instead of WAV clips").build());
         options.addOption(Option.builder().longOpt("pipe-output-rate").hasArg().argName("HZ")
-            .desc("Raw pipe output sample rate in Hz (default matches --sample-rate)").build());
+            .desc("Raw pipe output sample rate in Hz (default matches --sample-rate; applies to following --pipe-output entries)").build());
         options.addOption(Option.builder().longOpt("pipe-output-channels").hasArg().argName("N")
-            .desc("Raw pipe output channel count (default matches --channels)").build());
+            .desc("Raw pipe output channel count (default matches --channels; applies to following --pipe-output entries)").build());
         options.addOption(Option.builder().longOpt("pipe-output-bits").hasArg().argName("BITS")
-            .desc("Raw pipe output bit depth (default matches --bitrate)").build());
+            .desc("Raw pipe output bit depth (default matches --bitrate; applies to following --pipe-output entries)").build());
         options.addOption(Option.builder().longOpt("pipe-output-endian").hasArg().argName("ORDER")
-            .desc("Raw pipe output byte order: little or big (default matches --endian)").build());
+            .desc("Raw pipe output byte order: little or big (default matches --endian; applies to following --pipe-output entries)").build());
         options.addOption(Option.builder().longOpt("pipe-output-unsigned")
-            .desc("Raw pipe output samples are unsigned PCM (default signed PCM)").build());
+            .desc("Raw pipe output samples are unsigned PCM (default signed PCM; applies to following --pipe-output entries)").build());
         options.addOption(Option.builder().longOpt("pipe-output-pad")
             .desc("When pipe raw mode is enabled, emit silence to --pipe-output commands while input stream stalls").build());
         options.addOption(Option.builder().longOpt("pipe-output-pad-delay").hasArg().argName("MS")
@@ -348,7 +350,7 @@ public class RadioPipeMain
             }
             AudioFormat pipeInputRawFormat = null;
             AudioFormat stdoutRawFormat = null;
-            AudioFormat pipeOutputRawFormat = null;
+            List<StreamRecorder.PipeOutputTarget> pipeOutputTargets = new ArrayList<>();
             AudioFormat inputDevFormat = null;
 
             if (defaultSampleRate <= 0) {
@@ -438,34 +440,16 @@ public class RadioPipeMain
                         stdoutBigEndian);
             }
 
-            if (pipeOutputRaw) {
-                float pipeSampleRate = Float.parseFloat(cmd.getOptionValue("pipe-output-rate", String.valueOf(defaultSampleRate)));
-                int pipeChannels = Integer.parseInt(cmd.getOptionValue("pipe-output-channels", String.valueOf(defaultChannels)));
-                int pipeBitDepth = Integer.parseInt(cmd.getOptionValue("pipe-output-bits", String.valueOf(defaultBitDepth)));
-                boolean pipeBigEndian = resolveEndianOption(cmd, "pipe-output-endian", defaultBigEndian);
-                boolean pipeUnsigned = cmd.hasOption("pipe-output-unsigned");
-
-                if (pipeSampleRate <= 0) {
-                    throw new ParseException("pipe-output-rate must be > 0");
-                }
-                if (pipeChannels <= 0) {
-                    throw new ParseException("pipe-output-channels must be > 0");
-                }
-                if (pipeBitDepth <= 0 || pipeBitDepth % 8 != 0) {
-                    throw new ParseException("pipe-output-bits must be a positive multiple of 8");
-                }
-
-                AudioFormat.Encoding pipeEncoding = pipeUnsigned
-                        ? AudioFormat.Encoding.PCM_UNSIGNED
-                        : AudioFormat.Encoding.PCM_SIGNED;
-                pipeOutputRawFormat = new AudioFormat(
-                        pipeEncoding,
-                        pipeSampleRate,
-                        pipeBitDepth,
-                        pipeChannels,
-                        pipeChannels * (pipeBitDepth / 8),
-                        pipeSampleRate,
-                        pipeBigEndian);
+            if (usePipeOutput) {
+                pipeOutputTargets = parsePipeOutputTargetsInOrder(
+                        args,
+                        defaultSampleRate,
+                        defaultChannels,
+                        defaultBitDepth,
+                        defaultBigEndian,
+                        pipeOutputRaw,
+                        pipeOutputPad,
+                        pipeOutputPadDelayMs);
             }
 
             if (pipeInputRaw) {
@@ -622,8 +606,7 @@ public class RadioPipeMain
             recorder.setStdoutOutput(useStdout, stdoutRaw, stdoutRawFormat, stdoutPad, stdoutPadDelayMs);
             recorder.setDeviceOutput(outputDeviceSelector);
             recorder.setDeviceInput(useInputDev ? inputDeviceSelector : null, inputDevFormat);
-            recorder.setPipeOutputs(pipeCommands);
-            recorder.setPipeRawOutput(pipeOutputRaw, pipeOutputRawFormat, pipeOutputPad, pipeOutputPadDelayMs);
+            recorder.setPipeOutputs(pipeOutputTargets);
             recorder.setPipeInput(usePipeInput ? pipeInputCommand : null, pipeInputRaw, pipeInputRawFormat);
             recorder.setApiWebSocketServer(apiWebSocketServer);
             final ApiWebSocketServer shutdownApiWebSocketServer = apiWebSocketServer;
@@ -889,6 +872,192 @@ public class RadioPipeMain
     private static boolean isBlank(String value)
     {
         return value == null || value.trim().isEmpty();
+    }
+
+    private static List<StreamRecorder.PipeOutputTarget> parsePipeOutputTargetsInOrder(String[] args,
+                                                                                       float defaultSampleRate,
+                                                                                       int defaultChannels,
+                                                                                       int defaultBitDepth,
+                                                                                       boolean defaultBigEndian,
+                                                                                       boolean defaultRawMode,
+                                                                                       boolean defaultPadMode,
+                                                                                       long defaultPadDelayMillis) throws ParseException {
+        List<StreamRecorder.PipeOutputTarget> targets = new ArrayList<>();
+        float currentRate = defaultSampleRate;
+        int currentChannels = defaultChannels;
+        int currentBits = defaultBitDepth;
+        boolean currentBigEndian = defaultBigEndian;
+        boolean currentUnsigned = false;
+        boolean currentRaw = defaultRawMode;
+        boolean currentPad = defaultPadMode;
+        long currentPadDelayMillis = defaultPadDelayMillis;
+
+        for (int i = 0; i < args.length; i++) {
+            String token = args[i];
+            if (token == null || token.isEmpty()) {
+                continue;
+            }
+
+            String inlineValue = null;
+            int equalsIndex = token.indexOf('=');
+            if (equalsIndex > 0) {
+                inlineValue = token.substring(equalsIndex + 1);
+                token = token.substring(0, equalsIndex);
+            }
+
+            switch (token) {
+                case "--pipe-output": {
+                    String commandValue = (inlineValue != null) ? inlineValue : ((i + 1) < args.length ? args[++i] : null);
+                    if (isBlank(commandValue)) {
+                        throw new ParseException("pipe-output command must not be empty");
+                    }
+                    targets.add(buildPipeOutputTarget(
+                            commandValue,
+                            currentRaw,
+                            currentRate,
+                            currentChannels,
+                            currentBits,
+                            currentBigEndian,
+                            currentUnsigned,
+                            currentPad,
+                            currentPadDelayMillis));
+                    break;
+                }
+                case "--pipe-output-raw":
+                    currentRaw = true;
+                    break;
+                case "--pipe-output-pad":
+                    currentPad = true;
+                    currentRaw = true;
+                    break;
+                case "--pipe-output-pad-delay": {
+                    String value = (inlineValue != null) ? inlineValue : ((i + 1) < args.length ? args[++i] : null);
+                    if (isBlank(value)) {
+                        throw new ParseException("pipe-output-pad-delay requires a value in milliseconds");
+                    }
+                    try {
+                        currentPadDelayMillis = Long.parseLong(value);
+                    } catch (NumberFormatException nfe) {
+                        throw new ParseException("pipe-output-pad-delay must be >= 0 milliseconds");
+                    }
+                    if (currentPadDelayMillis < 0L) {
+                        throw new ParseException("pipe-output-pad-delay must be >= 0 milliseconds");
+                    }
+                    currentPad = true;
+                    currentRaw = true;
+                    break;
+                }
+                case "--pipe-output-rate": {
+                    String value = (inlineValue != null) ? inlineValue : ((i + 1) < args.length ? args[++i] : null);
+                    if (isBlank(value)) {
+                        throw new ParseException("pipe-output-rate must be > 0");
+                    }
+                    try {
+                        currentRate = Float.parseFloat(value);
+                    } catch (NumberFormatException nfe) {
+                        throw new ParseException("pipe-output-rate must be > 0");
+                    }
+                    if (currentRate <= 0.0f) {
+                        throw new ParseException("pipe-output-rate must be > 0");
+                    }
+                    currentRaw = true;
+                    break;
+                }
+                case "--pipe-output-channels": {
+                    String value = (inlineValue != null) ? inlineValue : ((i + 1) < args.length ? args[++i] : null);
+                    if (isBlank(value)) {
+                        throw new ParseException("pipe-output-channels must be > 0");
+                    }
+                    try {
+                        currentChannels = Integer.parseInt(value);
+                    } catch (NumberFormatException nfe) {
+                        throw new ParseException("pipe-output-channels must be > 0");
+                    }
+                    if (currentChannels <= 0) {
+                        throw new ParseException("pipe-output-channels must be > 0");
+                    }
+                    currentRaw = true;
+                    break;
+                }
+                case "--pipe-output-bits": {
+                    String value = (inlineValue != null) ? inlineValue : ((i + 1) < args.length ? args[++i] : null);
+                    if (isBlank(value)) {
+                        throw new ParseException("pipe-output-bits must be a positive multiple of 8");
+                    }
+                    try {
+                        currentBits = Integer.parseInt(value);
+                    } catch (NumberFormatException nfe) {
+                        throw new ParseException("pipe-output-bits must be a positive multiple of 8");
+                    }
+                    if (currentBits <= 0 || currentBits % 8 != 0) {
+                        throw new ParseException("pipe-output-bits must be a positive multiple of 8");
+                    }
+                    currentRaw = true;
+                    break;
+                }
+                case "--pipe-output-endian": {
+                    String value = (inlineValue != null) ? inlineValue : ((i + 1) < args.length ? args[++i] : null);
+                    currentBigEndian = parseEndianOption("pipe-output-endian", value);
+                    currentRaw = true;
+                    break;
+                }
+                case "--pipe-output-unsigned":
+                    currentUnsigned = true;
+                    currentRaw = true;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        return targets;
+    }
+
+    private static StreamRecorder.PipeOutputTarget buildPipeOutputTarget(String command,
+                                                                         boolean rawMode,
+                                                                         float sampleRate,
+                                                                         int channels,
+                                                                         int bitDepth,
+                                                                         boolean bigEndian,
+                                                                         boolean unsigned,
+                                                                         boolean padMode,
+                                                                         long padDelayMillis) throws ParseException {
+        String normalizedCommand = command.trim();
+        if (normalizedCommand.isEmpty()) {
+            throw new ParseException("pipe-output command must not be empty");
+        }
+
+        if (!rawMode) {
+            return StreamRecorder.PipeOutputTarget.wav(normalizedCommand);
+        }
+
+        if (sampleRate <= 0.0f) {
+            throw new ParseException("pipe-output-rate must be > 0");
+        }
+        if (channels <= 0) {
+            throw new ParseException("pipe-output-channels must be > 0");
+        }
+        if (bitDepth <= 0 || bitDepth % 8 != 0) {
+            throw new ParseException("pipe-output-bits must be a positive multiple of 8");
+        }
+
+        AudioFormat.Encoding encoding = unsigned
+                ? AudioFormat.Encoding.PCM_UNSIGNED
+                : AudioFormat.Encoding.PCM_SIGNED;
+        AudioFormat rawFormat = new AudioFormat(
+                encoding,
+                sampleRate,
+                bitDepth,
+                channels,
+                channels * (bitDepth / 8),
+                sampleRate,
+                bigEndian);
+
+        return StreamRecorder.PipeOutputTarget.raw(
+                normalizedCommand,
+                rawFormat,
+                padMode,
+                Math.max(0L, padDelayMillis));
     }
 
     private static final class ResolvedRecordingsDirectory {

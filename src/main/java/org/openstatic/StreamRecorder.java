@@ -88,12 +88,7 @@ public class StreamRecorder {
     private volatile String deviceOutputSelector;
     private volatile boolean deviceOutputConversionWarned;
     private volatile boolean deviceConfigLogged;
-    private final List<String> pipeOutputCommands;
-    private volatile boolean pipeRawMode;
-    private volatile AudioFormat pipeRawFormat;
-    private volatile boolean pipeRawPadMode;
-    private volatile long pipeRawPadDelayMillis;
-    private volatile boolean pipeRawConversionWarned;
+    private final List<PipeOutputTarget> pipeOutputTargets;
     private volatile boolean pipeConfigLogged;
     private volatile String pipeInputCommand;
     private volatile boolean pipeInputRawMode;
@@ -249,12 +244,7 @@ public class StreamRecorder {
         this.deviceOutputSelector = null;
         this.deviceOutputConversionWarned = false;
         this.deviceConfigLogged = false;
-        this.pipeOutputCommands = new ArrayList<>();
-        this.pipeRawMode = false;
-        this.pipeRawFormat = null;
-        this.pipeRawPadMode = false;
-        this.pipeRawPadDelayMillis = DEFAULT_STDOUT_PAD_DELAY_MILLIS;
-        this.pipeRawConversionWarned = false;
+        this.pipeOutputTargets = new ArrayList<>();
         this.pipeConfigLogged = false;
         this.pipeInputCommand = null;
         this.pipeInputRawMode = false;
@@ -374,11 +364,23 @@ public class StreamRecorder {
     }
 
     public void setPipeOutputs(String[] pipeCommands) {
-        this.pipeOutputCommands.clear();
+        List<PipeOutputTarget> targets = new ArrayList<>();
         if (pipeCommands != null) {
             for (String pipeCommand : pipeCommands) {
                 if (!isBlank(pipeCommand)) {
-                    this.pipeOutputCommands.add(pipeCommand.trim());
+                    targets.add(PipeOutputTarget.wav(pipeCommand.trim()));
+                }
+            }
+        }
+        setPipeOutputs(targets);
+    }
+
+    public void setPipeOutputs(List<PipeOutputTarget> targets) {
+        this.pipeOutputTargets.clear();
+        if (targets != null) {
+            for (PipeOutputTarget target : targets) {
+                if (target != null && !isBlank(target.command)) {
+                    this.pipeOutputTargets.add(target.normalized());
                 }
             }
         }
@@ -393,23 +395,24 @@ public class StreamRecorder {
                                  AudioFormat rawFormat,
                                  boolean padMode,
                                  long padDelayMillis) {
-        if (!rawMode) {
-            this.pipeRawMode = false;
-            this.pipeRawFormat = null;
-            this.pipeRawPadMode = false;
-            this.pipeRawPadDelayMillis = DEFAULT_STDOUT_PAD_DELAY_MILLIS;
-            this.pipeRawConversionWarned = false;
+        if (this.pipeOutputTargets.isEmpty()) {
             this.pipeConfigLogged = false;
             return;
         }
-        if (rawFormat == null) {
-            throw new IllegalArgumentException("pipe raw mode requires a format");
+
+        List<PipeOutputTarget> remappedTargets = new ArrayList<>(this.pipeOutputTargets.size());
+        for (PipeOutputTarget existing : this.pipeOutputTargets) {
+            if (!rawMode) {
+                remappedTargets.add(PipeOutputTarget.wav(existing.command));
+            } else {
+                if (rawFormat == null) {
+                    throw new IllegalArgumentException("pipe raw mode requires a format");
+                }
+                remappedTargets.add(PipeOutputTarget.raw(existing.command, rawFormat, padMode, padDelayMillis));
+            }
         }
-        this.pipeRawMode = true;
-        this.pipeRawFormat = rawFormat;
-        this.pipeRawPadMode = padMode;
-        this.pipeRawPadDelayMillis = Math.max(0L, padDelayMillis);
-        this.pipeRawConversionWarned = false;
+        this.pipeOutputTargets.clear();
+        this.pipeOutputTargets.addAll(remappedTargets);
         this.pipeConfigLogged = false;
     }
 
@@ -872,14 +875,7 @@ public class StreamRecorder {
         if (this.deviceOutputEnabled) {
             deviceOutputSession = openDeviceOutputSession(processingFormat, clipOutputFormat);
         }
-        List<PipeOutputSession> pipeSessions = openPipeOutputSessions();
-        ArrayDeque<byte[]> pipePadBuffer = new ArrayDeque<>();
-        if (!pipeSessions.isEmpty() && this.pipeRawMode && this.pipeRawPadMode) {
-            long targetBytes = Math.round(this.pipeRawPadDelayMillis / 1000.0 * frameRate) * frameSize;
-            if (targetBytes > 0) {
-                pipePadBuffer.addLast(new byte[(int) targetBytes]);
-            }
-        }
+        List<PipeOutputSession> pipeSessions = openPipeOutputSessions(frameRate, frameSize);
 
         BlockingQueue<StreamReadResult> readQueue = new LinkedBlockingQueue<>();
         Thread readerThread = new Thread(() -> {
@@ -988,8 +984,8 @@ public class StreamRecorder {
                     if (inputEndOfStream) {
                         break;
                     }
-                    boolean useStallPadding = (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode)
-                            || (!pipeSessions.isEmpty() && this.pipeRawMode && this.pipeRawPadMode);
+                        boolean useStallPadding = (this.stdoutEnabled && this.stdoutRawMode && this.stdoutPadMode)
+                            || hasAnyPipeRawPadEnabled(pipeSessions);
                     if (useStallPadding) {
                         int padBytes = padFramesPerTick * frameSize;
                         byte[] padSilence = new byte[padBytes];
@@ -997,10 +993,7 @@ public class StreamRecorder {
                             stdoutPadBuffer.addLast(padSilence);
                             drainStdoutPadBuffer(stdoutPadBuffer, padBytes, processingFormat);
                         }
-                        if (!pipeSessions.isEmpty() && this.pipeRawMode && this.pipeRawPadMode) {
-                            pipePadBuffer.addLast(padSilence);
-                            drainPipePadBuffer(pipePadBuffer, padBytes, processingFormat, pipeSessions);
-                        }
+                        writePipePadSilence(pipeSessions, padSilence, padBytes, processingFormat);
 
                         if (activelyRecording) {
                             chunk.write(padSilence, 0, padBytes);
@@ -1027,7 +1020,7 @@ public class StreamRecorder {
                                 if (this.stdoutEnabled && !this.stdoutRawMode) {
                                     writeChunkToStdoutWav(clipAudio, processingFormat, clipOutputFormat);
                                 }
-                                if (!pipeSessions.isEmpty() && !this.pipeRawMode) {
+                                if (hasAnyPipeWavSessions(pipeSessions)) {
                                     writeChunkToPipeWav(pipeSessions, clipAudio, processingFormat, clipOutputFormat);
                                 }
                             } else {
@@ -1259,17 +1252,7 @@ public class StreamRecorder {
                         writeStdoutRaw(frameForOutput, n, processingFormat);
                     }
                 }
-                if (!pipeSessions.isEmpty() && this.pipeRawMode) {
-                    if (this.pipeRawPadMode) {
-                        byte[] pipeFrame = includeFrameInClip
-                                ? Arrays.copyOf(frameForOutput, n)
-                                : new byte[n];
-                        pipePadBuffer.addLast(pipeFrame);
-                        drainPipePadBuffer(pipePadBuffer, n, processingFormat, pipeSessions);
-                    } else if (includeFrameInClip) {
-                        writePipeRaw(pipeSessions, frameForOutput, n, processingFormat);
-                    }
-                }
+                writePipeFrames(pipeSessions, frameForOutput, n, processingFormat, includeFrameInClip);
                 if (deviceOutputSession != null && includeFrameInClip) {
                     writeDeviceOutput(deviceOutputSession, frameForOutput, n, processingFormat);
                 }
@@ -1310,7 +1293,7 @@ public class StreamRecorder {
                             if (this.stdoutEnabled && !this.stdoutRawMode) {
                                 writeChunkToStdoutWav(clipAudio, processingFormat, clipOutputFormat);
                             }
-                            if (!pipeSessions.isEmpty() && !this.pipeRawMode) {
+                            if (hasAnyPipeWavSessions(pipeSessions)) {
                                 writeChunkToPipeWav(pipeSessions, clipAudio, processingFormat, clipOutputFormat);
                             }
                         } else {
@@ -1339,7 +1322,7 @@ public class StreamRecorder {
                     if (this.stdoutEnabled && !this.stdoutRawMode) {
                         writeChunkToStdoutWav(clipAudio, processingFormat, clipOutputFormat);
                     }
-                    if (!pipeSessions.isEmpty() && !this.pipeRawMode) {
+                    if (hasAnyPipeWavSessions(pipeSessions)) {
                         writeChunkToPipeWav(pipeSessions, clipAudio, processingFormat, clipOutputFormat);
                     }
                 } else {
@@ -1426,26 +1409,24 @@ public class StreamRecorder {
     }
 
     private void logPipeConfiguration(AudioFormat activeFormat) {
-        if (this.pipeOutputCommands.isEmpty() || this.pipeConfigLogged) {
+        if (this.pipeOutputTargets.isEmpty() || this.pipeConfigLogged) {
             return;
         }
 
-        for (String command : this.pipeOutputCommands) {
-            log("PIPE", ANSI_CYAN,
-                    "pipe output enabled: " + command);
-        }
-        if (this.pipeRawMode) {
-            AudioFormat targetFormat = (this.pipeRawFormat == null) ? activeFormat : this.pipeRawFormat;
-            log("PIPE", ANSI_CYAN,
-                "pipe mode: raw PCM stream: " + describeAudioFormat(targetFormat));
-            if (this.pipeRawPadMode) {
+        for (PipeOutputTarget target : this.pipeOutputTargets) {
+            if (target.rawMode) {
                 log("PIPE", ANSI_CYAN,
-                        "pipe pad enabled: " + this.pipeRawPadDelayMillis
-                                + " ms delay buffer, continuous silence on stall.");
+                        "pipe output enabled (raw PCM): " + target.command
+                                + " | " + describeAudioFormat(target.rawFormat));
+                if (target.padMode) {
+                    log("PIPE", ANSI_CYAN,
+                            "pipe pad enabled for command: " + target.command
+                                    + " | delay " + target.padDelayMillis + " ms.");
+                }
+            } else {
+                log("PIPE", ANSI_CYAN,
+                        "pipe output enabled (WAV clip stream): " + target.command);
             }
-        } else {
-            log("PIPE", ANSI_CYAN,
-                    "pipe mode: WAV clip stream (one WAV payload per closed clip).");
         }
         this.pipeConfigLogged = true;
     }
@@ -1552,18 +1533,22 @@ public class StreamRecorder {
         }
     }
 
-    private void drainPipePadBuffer(ArrayDeque<byte[]> buffer,
+    private void drainPipePadBuffer(PipeOutputSession session,
                                     int bytes,
-                                    AudioFormat format,
-                                    List<PipeOutputSession> sessions) {
+                                    AudioFormat format) {
+        if (session == null || session.rawPadBuffer == null) {
+            return;
+        }
+
+        ArrayDeque<byte[]> buffer = session.rawPadBuffer;
         int remaining = bytes;
         while (remaining > 0 && !buffer.isEmpty()) {
             byte[] head = buffer.removeFirst();
             if (head.length <= remaining) {
-                writePipeRaw(sessions, head, head.length, format);
+                writePipeRaw(session, head, head.length, format);
                 remaining -= head.length;
             } else {
-                writePipeRaw(sessions, head, remaining, format);
+                writePipeRaw(session, head, remaining, format);
                 buffer.addFirst(Arrays.copyOfRange(head, remaining, head.length));
                 remaining = 0;
             }
@@ -1627,20 +1612,92 @@ public class StreamRecorder {
         }
     }
 
-    private List<PipeOutputSession> openPipeOutputSessions() {
+    private static boolean hasAnyPipeRawPadEnabled(List<PipeOutputSession> sessions) {
+        if (sessions == null || sessions.isEmpty()) {
+            return false;
+        }
+        for (PipeOutputSession session : sessions) {
+            if (session != null && session.target.rawMode && session.target.padMode) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasAnyPipeWavSessions(List<PipeOutputSession> sessions) {
+        if (sessions == null || sessions.isEmpty()) {
+            return false;
+        }
+        for (PipeOutputSession session : sessions) {
+            if (session != null && !session.target.rawMode) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void writePipePadSilence(List<PipeOutputSession> sessions,
+                                     byte[] padSilence,
+                                     int padBytes,
+                                     AudioFormat sourceFormat) {
+        if (sessions == null || sessions.isEmpty()) {
+            return;
+        }
+        for (PipeOutputSession session : sessions) {
+            if (session == null || !session.target.rawMode || !session.target.padMode) {
+                continue;
+            }
+            session.rawPadBuffer.addLast(Arrays.copyOf(padSilence, padBytes));
+            drainPipePadBuffer(session, padBytes, sourceFormat);
+        }
+    }
+
+    private void writePipeFrames(List<PipeOutputSession> sessions,
+                                 byte[] frameForOutput,
+                                 int len,
+                                 AudioFormat sourceFormat,
+                                 boolean includeFrameInClip) {
+        if (sessions == null || sessions.isEmpty()) {
+            return;
+        }
+
+        for (PipeOutputSession session : sessions) {
+            if (session == null || !session.target.rawMode) {
+                continue;
+            }
+
+            if (session.target.padMode) {
+                byte[] pipeFrame = includeFrameInClip
+                        ? Arrays.copyOf(frameForOutput, len)
+                        : new byte[len];
+                session.rawPadBuffer.addLast(pipeFrame);
+                drainPipePadBuffer(session, len, sourceFormat);
+            } else if (includeFrameInClip) {
+                writePipeRaw(session, frameForOutput, len, sourceFormat);
+            }
+        }
+    }
+
+    private List<PipeOutputSession> openPipeOutputSessions(float frameRate, int frameSize) {
         List<PipeOutputSession> sessions = new ArrayList<>();
-        for (String command : this.pipeOutputCommands) {
-            PipeOutputSession session = new PipeOutputSession(command);
+        for (PipeOutputTarget target : this.pipeOutputTargets) {
+            PipeOutputSession session = new PipeOutputSession(target);
             if (!restartPipeSession(session, "startup")) {
                 session.nextRestartAttemptAtMillis = System.currentTimeMillis() + PIPE_RESTART_BACKOFF_MILLIS;
+            }
+            if (target.rawMode && target.padMode) {
+                long targetBytes = Math.round(target.padDelayMillis / 1000.0 * frameRate) * frameSize;
+                if (targetBytes > 0) {
+                    session.rawPadBuffer.addLast(new byte[(int) targetBytes]);
+                }
             }
             sessions.add(session);
         }
         return sessions;
     }
 
-    private PipeOutputSession openPipeOutputSession(String command) throws IOException {
-        ProcessBuilder pb = new ProcessBuilder(buildShellCommand(command));
+    private PipeOutputSession openPipeOutputSession(PipeOutputTarget target) throws IOException {
+        ProcessBuilder pb = new ProcessBuilder(buildShellCommand(target.command));
         pb.redirectErrorStream(true);
         Process process = pb.start();
 
@@ -1648,16 +1705,16 @@ public class StreamRecorder {
             try (BufferedReader outputReader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                 String line;
                 while ((line = outputReader.readLine()) != null) {
-                    log("PIPE", ANSI_BLUE, "[" + command + "] " + line);
+                    log("PIPE", ANSI_BLUE, "[" + target.command + "] " + line);
                 }
             } catch (IOException ignored) {
                 // Process stream closed.
             }
-        }, "pipe-output-" + Math.abs(command.hashCode()));
+        }, "pipe-output-" + Math.abs(target.command.hashCode()));
         outputDrainer.setDaemon(true);
         outputDrainer.start();
 
-        PipeOutputSession session = new PipeOutputSession(command);
+        PipeOutputSession session = new PipeOutputSession(target);
         session.process = process;
         session.stdin = process.getOutputStream();
         session.broken = false;
@@ -1711,36 +1768,36 @@ public class StreamRecorder {
         }
 
         for (PipeOutputSession session : sessions) {
-            writePipeBytes(session, wavBytes, 0, wavBytes.length, "WAV clip");
+            if (!session.target.rawMode) {
+                writePipeBytes(session, wavBytes, 0, wavBytes.length, "WAV clip");
+            }
         }
     }
 
-    private void writePipeRaw(List<PipeOutputSession> sessions,
+    private void writePipeRaw(PipeOutputSession session,
                               byte[] audioData,
                               int len,
                               AudioFormat sourceFormat) {
-        if (sessions == null || sessions.isEmpty() || len <= 0) {
+        if (session == null || len <= 0 || !session.target.rawMode) {
             return;
         }
 
-        AudioFormat targetFormat = (this.pipeRawFormat == null) ? sourceFormat : this.pipeRawFormat;
+        AudioFormat targetFormat = (session.target.rawFormat == null) ? sourceFormat : session.target.rawFormat;
 
         if (audioFormatsEquivalent(sourceFormat, targetFormat)) {
-            for (PipeOutputSession session : sessions) {
-                writePipeBytes(session, audioData, 0, len, "raw PCM");
-            }
+            writePipeBytes(session, audioData, 0, len, "raw PCM");
             return;
         }
 
         if (!AudioSystem.isConversionSupported(targetFormat, sourceFormat)) {
-            if (!this.pipeRawConversionWarned) {
-                this.pipeRawConversionWarned = true;
+            if (!session.rawConversionWarned) {
+                session.rawConversionWarned = true;
                 log("PIPE", ANSI_YELLOW,
                         "pipe raw conversion unsupported from "
                                 + describeAudioFormat(sourceFormat)
                                 + " to "
                                 + describeAudioFormat(targetFormat)
-                                + "; dropping raw pipe audio.");
+                                + "; dropping raw pipe audio for command: " + session.target.command);
             }
             return;
         }
@@ -1755,14 +1812,13 @@ public class StreamRecorder {
                 convertedOut.write(convertedBuffer, 0, read);
             }
             byte[] convertedBytes = convertedOut.toByteArray();
-            for (PipeOutputSession session : sessions) {
-                writePipeBytes(session, convertedBytes, 0, convertedBytes.length, "raw PCM");
-            }
+            writePipeBytes(session, convertedBytes, 0, convertedBytes.length, "raw PCM");
         } catch (Exception conversionException) {
-            if (!this.pipeRawConversionWarned) {
-                this.pipeRawConversionWarned = true;
+            if (!session.rawConversionWarned) {
+                session.rawConversionWarned = true;
                 log("PIPE", ANSI_YELLOW,
-                        "pipe raw conversion failed (" + conversionException.getMessage() + "); dropping raw pipe audio.");
+                        "pipe raw conversion failed (" + conversionException.getMessage()
+                                + "); dropping raw pipe audio for command: " + session.target.command);
             }
         }
     }
@@ -1794,7 +1850,7 @@ public class StreamRecorder {
             return true;
         } catch (IOException ioe) {
             log("PIPE", ANSI_YELLOW,
-                    "Pipe command closed (" + modeDescription + "): " + session.command
+                    "Pipe command closed (" + modeDescription + "): " + session.target.command
                             + " (" + ioe.getMessage() + "), scheduling restart.");
             markPipeSessionFailed(session);
             return false;
@@ -1810,7 +1866,7 @@ public class StreamRecorder {
         if (process != null && !process.isAlive()) {
             markPipeSessionFailed(session);
             log("PIPE", ANSI_YELLOW,
-                    "Pipe command exited, scheduling restart (" + modeDescription + "): " + session.command);
+                    "Pipe command exited, scheduling restart (" + modeDescription + "): " + session.target.command);
         }
 
         if (session.process != null && session.stdin != null && !session.broken) {
@@ -1830,13 +1886,14 @@ public class StreamRecorder {
             return false;
         }
         try {
-            PipeOutputSession restarted = openPipeOutputSession(session.command);
+            PipeOutputSession restarted = openPipeOutputSession(session.target);
             session.process = restarted.process;
             session.stdin = restarted.stdin;
             session.broken = false;
+            session.rawConversionWarned = false;
             session.nextRestartAttemptAtMillis = 0L;
             log("PIPE", ANSI_CYAN,
-                    "Pipe command running (" + reason + "): " + session.command);
+                    "Pipe command running (" + reason + "): " + session.target.command);
             return true;
         } catch (IOException ioe) {
             session.process = null;
@@ -1844,7 +1901,7 @@ public class StreamRecorder {
             session.broken = true;
             session.nextRestartAttemptAtMillis = System.currentTimeMillis() + PIPE_RESTART_BACKOFF_MILLIS;
             log("PIPE", ANSI_YELLOW,
-                    "Failed to start pipe command: " + session.command + " (" + ioe.getMessage() + ")");
+                    "Failed to start pipe command: " + session.target.command + " (" + ioe.getMessage() + ")");
             return false;
         }
     }
@@ -2766,19 +2823,65 @@ public class StreamRecorder {
         return (streamUrl != null) ? streamUrl.toString() : "unknown";
     }
 
-    private static final class PipeOutputSession {
+    public static final class PipeOutputTarget {
         private final String command;
+        private final boolean rawMode;
+        private final AudioFormat rawFormat;
+        private final boolean padMode;
+        private final long padDelayMillis;
+
+        private PipeOutputTarget(String command,
+                                 boolean rawMode,
+                                 AudioFormat rawFormat,
+                                 boolean padMode,
+                                 long padDelayMillis) {
+            this.command = command;
+            this.rawMode = rawMode;
+            this.rawFormat = rawFormat;
+            this.padMode = rawMode && padMode;
+            this.padDelayMillis = Math.max(0L, padDelayMillis);
+        }
+
+        public static PipeOutputTarget wav(String command) {
+            return new PipeOutputTarget(command, false, null, false, 0L);
+        }
+
+        public static PipeOutputTarget raw(String command,
+                                           AudioFormat rawFormat,
+                                           boolean padMode,
+                                           long padDelayMillis) {
+            if (rawFormat == null) {
+                throw new IllegalArgumentException("pipe raw mode requires a format");
+            }
+            return new PipeOutputTarget(command, true, rawFormat, padMode, padDelayMillis);
+        }
+
+        private PipeOutputTarget normalized() {
+            String normalizedCommand = (command == null) ? "" : command.trim();
+            if (!rawMode) {
+                return wav(normalizedCommand);
+            }
+            return raw(normalizedCommand, rawFormat, padMode, padDelayMillis);
+        }
+    }
+
+    private static final class PipeOutputSession {
+        private final PipeOutputTarget target;
         private Process process;
         private OutputStream stdin;
         private boolean broken;
+        private boolean rawConversionWarned;
         private long nextRestartAttemptAtMillis;
+        private final ArrayDeque<byte[]> rawPadBuffer;
 
-        private PipeOutputSession(String command) {
-            this.command = command;
+        private PipeOutputSession(PipeOutputTarget target) {
+            this.target = target;
             this.process = null;
             this.stdin = null;
             this.broken = false;
+            this.rawConversionWarned = false;
             this.nextRestartAttemptAtMillis = 0L;
+            this.rawPadBuffer = new ArrayDeque<>();
         }
     }
 
