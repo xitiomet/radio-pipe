@@ -10,6 +10,7 @@ $RECORDING_SERVERS_FILE = __DIR__ . '/recording_servers.json';
 $UI_SETTINGS_FILE = __DIR__ . '/rtl_sdr_ui_settings.json';
 $PIPE_OUTPUTS_FILE = __DIR__ . '/pipe_outputs.json';
 $TEMPLATES_FILE = __DIR__ . '/rtl_sdr_templates.json';
+$TEMPLATES_DIR = __DIR__ . '/templates';
 $LOG_DIR = __DIR__ . '/rtl_sdr_logs';
 $recordingsRoot = __DIR__ . '/recordings';
 
@@ -68,7 +69,7 @@ $RMS_STDOUT_PAD_DELAY_MS = isset($RMS_STDOUT_PAD_DELAY_MS)
 	: 150;
 $RMS_INPUT_DEJITTER_MS = isset($RMS_INPUT_DEJITTER_MS)
 	? max(0, (int)$RMS_INPUT_DEJITTER_MS)
-	: 150;
+	: 0;
 $RADIO_PIPE_API_WEBSOCKET_HOST = isset($RADIO_PIPE_API_WEBSOCKET_HOST) && trim((string)$RADIO_PIPE_API_WEBSOCKET_HOST) !== ''
 	? trim((string)$RADIO_PIPE_API_WEBSOCKET_HOST)
 	: '0.0.0.0';
@@ -1547,46 +1548,144 @@ function reconcile_runtime_state_with_live_process_groups(array &$state, string 
 	return $changed;
 }
 
-function load_templates(string $filePath, string $legacyUiSettingsFile = ''): array
+function load_templates(string $dir, string $legacyUiSettingsFile = '', string $legacyTemplatesFile = ''): array
 {
-	if (!file_exists($filePath)) {
-		$seedTemplates = array();
-		if ($legacyUiSettingsFile !== '' && file_exists($legacyUiSettingsFile)) {
-			$legacyRaw = file_get_contents($legacyUiSettingsFile);
-			if (is_string($legacyRaw) && trim($legacyRaw) !== '') {
-				$legacyDecoded = json_decode($legacyRaw, true);
-				if (is_array($legacyDecoded) && isset($legacyDecoded['templates']) && is_array($legacyDecoded['templates'])) {
-					$seedTemplates = normalize_templates($legacyDecoded['templates']);
+	ensure_templates_directory($dir);
+
+	// One-time migration of the legacy aggregated rtl_sdr_templates.json file.
+	if ($legacyTemplatesFile !== '' && file_exists($legacyTemplatesFile)) {
+		$rawLegacy = file_get_contents($legacyTemplatesFile);
+		if (is_string($rawLegacy) && trim($rawLegacy) !== '') {
+			$decodedLegacy = json_decode($rawLegacy, true);
+			if (is_array($decodedLegacy)) {
+				foreach (normalize_templates($decodedLegacy) as $name => $config) {
+					save_template_to_dir($dir, $name, $config, false);
 				}
 			}
 		}
-
-		save_templates($filePath, $seedTemplates);
-		return $seedTemplates;
+		@rename($legacyTemplatesFile, $legacyTemplatesFile . '.migrated');
 	}
 
-	$raw = file_get_contents($filePath);
-	if (!is_string($raw) || trim($raw) === '') {
-		return array();
+	// One-time migration of templates that previously lived inside rtl_sdr_ui_settings.json.
+	if ($legacyUiSettingsFile !== '' && file_exists($legacyUiSettingsFile)) {
+		$rawSettings = file_get_contents($legacyUiSettingsFile);
+		if (is_string($rawSettings) && trim($rawSettings) !== '') {
+			$decodedSettings = json_decode($rawSettings, true);
+			if (is_array($decodedSettings) && isset($decodedSettings['templates']) && is_array($decodedSettings['templates'])) {
+				foreach (normalize_templates($decodedSettings['templates']) as $name => $config) {
+					save_template_to_dir($dir, $name, $config, false);
+				}
+			}
+		}
 	}
 
-	$decoded = json_decode($raw, true);
-	if (!is_array($decoded)) {
-		return array();
-	}
-
-	return normalize_templates($decoded);
+	return read_templates_from_dir($dir);
 }
 
-function save_templates(string $filePath, array $templates): bool
+function ensure_templates_directory(string $dir): void
 {
-	$normalized = normalize_templates($templates);
-	$encoded = json_encode((object)$normalized, JSON_PRETTY_PRINT);
+	if ($dir === '') {
+		return;
+	}
+	if (!is_dir($dir)) {
+		@mkdir($dir, 0775, true);
+	}
+}
+
+function template_filename_for(string $name): string
+{
+	$name = trim($name);
+	if ($name === '') {
+		return '';
+	}
+	$slug = strtolower((string)preg_replace('/[^A-Za-z0-9._-]+/', '_', $name));
+	$slug = trim($slug, '._-');
+	if ($slug === '') {
+		$slug = 'template';
+	}
+	if (strlen($slug) > 64) {
+		$slug = substr($slug, 0, 64);
+	}
+	$hash = substr(sha1($name), 0, 8);
+	return $slug . '__' . $hash . '.json';
+}
+
+function read_templates_from_dir(string $dir): array
+{
+	$templates = array();
+	if ($dir === '' || !is_dir($dir)) {
+		return $templates;
+	}
+	$files = glob(rtrim($dir, '/') . '/*.json');
+	if (!is_array($files)) {
+		return $templates;
+	}
+	foreach ($files as $file) {
+		$raw = @file_get_contents($file);
+		if (!is_string($raw) || trim($raw) === '') {
+			continue;
+		}
+		$decoded = json_decode($raw, true);
+		if (!is_array($decoded)) {
+			continue;
+		}
+		$name = isset($decoded['templateName']) ? trim((string)$decoded['templateName']) : '';
+		if ($name === '') {
+			continue;
+		}
+		$decoded['templateName'] = $name;
+		$templates[$name] = $decoded;
+	}
+	ksort($templates, SORT_NATURAL | SORT_FLAG_CASE);
+	return $templates;
+}
+
+function save_template_to_dir(string $dir, string $name, array $config, bool $overwriteExisting = true): bool
+{
+	ensure_templates_directory($dir);
+	$name = trim($name);
+	if ($name === '' || $dir === '' || !is_dir($dir)) {
+		return false;
+	}
+	$config['templateName'] = $name;
+	$path = rtrim($dir, '/') . '/' . template_filename_for($name);
+	if (!$overwriteExisting && file_exists($path)) {
+		return true;
+	}
+	$encoded = json_encode($config, JSON_PRETTY_PRINT);
 	if (!is_string($encoded)) {
 		return false;
 	}
+	return file_put_contents($path, $encoded . "\n", LOCK_EX) !== false;
+}
 
-	return file_put_contents($filePath, $encoded . "\n", LOCK_EX) !== false;
+function delete_template_from_dir(string $dir, string $name): bool
+{
+	$name = trim($name);
+	if ($name === '' || $dir === '' || !is_dir($dir)) {
+		return false;
+	}
+	$path = rtrim($dir, '/') . '/' . template_filename_for($name);
+	if (!file_exists($path)) {
+		return true;
+	}
+	return @unlink($path);
+}
+
+// Merge-style bulk save: writes/updates each provided template but NEVER removes
+// templates not present in the payload. This avoids two concurrent clients
+// overwriting each other's templates. Use delete_template_from_dir() for explicit removal.
+function save_templates(string $dir, array $templates): bool
+{
+	ensure_templates_directory($dir);
+	$normalized = normalize_templates($templates);
+	$ok = true;
+	foreach ($normalized as $name => $config) {
+		if (!save_template_to_dir($dir, $name, $config, true)) {
+			$ok = false;
+		}
+	}
+	return $ok;
 }
 
 function ui_settings_for_response(array $settings, array $pipeOutputs = array()): array
@@ -1660,8 +1759,8 @@ if (!file_exists($RECORDING_SERVERS_FILE)) {
 	file_put_contents($RECORDING_SERVERS_FILE, "{}\n", LOCK_EX);
 }
 
-if (!file_exists($TEMPLATES_FILE)) {
-	load_templates($TEMPLATES_FILE, $UI_SETTINGS_FILE);
+if (!is_dir($TEMPLATES_DIR) || file_exists($TEMPLATES_FILE)) {
+	load_templates($TEMPLATES_DIR, $UI_SETTINGS_FILE, $TEMPLATES_FILE);
 }
 
 if (!file_exists($DESIRED_STATE_FILE)) {
@@ -1876,53 +1975,55 @@ function append_pipe_output_args(array &$command, array $config): void
 		return;
 	}
 
+	$formatArgs = array();
+	$rawEnabled = parse_boolean_flag($config['pipeOutputRaw'] ?? 0, false);
+	if ($rawEnabled) {
+		$formatArgs[] = '--pipe-output-raw';
+
+		$rawBits = trim((string)($config['pipeOutputBits'] ?? ''));
+		if ($rawBits !== '') {
+			$formatArgs[] = '--pipe-output-bits';
+			$formatArgs[] = $rawBits;
+		}
+
+		$rawChannels = trim((string)($config['pipeOutputChannels'] ?? ''));
+		if ($rawChannels !== '') {
+			$formatArgs[] = '--pipe-output-channels';
+			$formatArgs[] = $rawChannels;
+		}
+
+		$rawRate = trim((string)($config['pipeOutputRate'] ?? ''));
+		if ($rawRate !== '') {
+			$formatArgs[] = '--pipe-output-rate';
+			$formatArgs[] = $rawRate;
+		}
+
+		if (parse_boolean_flag($config['pipeOutputUnsigned'] ?? 0, false)) {
+			$formatArgs[] = '--pipe-output-unsigned';
+		}
+
+		if (parse_boolean_flag($config['pipeOutputBigEndian'] ?? 0, false)) {
+			$formatArgs[] = '--pipe-output-endian';
+			$formatArgs[] = 'big';
+		}
+
+		$padEnabled = parse_boolean_flag($config['pipeOutputPad'] ?? 0, false);
+		if ($padEnabled) {
+			$formatArgs[] = '--pipe-output-pad';
+			$padDelay = trim((string)($config['pipeOutputPadDelay'] ?? ''));
+			if ($padDelay !== '') {
+				$formatArgs[] = '--pipe-output-pad-delay';
+				$formatArgs[] = $padDelay;
+			}
+		}
+	}
+
 	foreach ($pipeOutputs as $pipeOutputOptions) {
+		foreach ($formatArgs as $formatArg) {
+			$command[] = $formatArg;
+		}
 		$command[] = '--pipe-output';
 		$command[] = $pipeOutputOptions;
-	}
-
-	$rawEnabled = parse_boolean_flag($config['pipeOutputRaw'] ?? 0, false);
-	if (!$rawEnabled) {
-		return;
-	}
-
-	$command[] = '--pipe-output-raw';
-
-	$rawBits = trim((string)($config['pipeOutputBits'] ?? ''));
-	if ($rawBits !== '') {
-		$command[] = '--pipe-output-bits';
-		$command[] = $rawBits;
-	}
-
-	$rawChannels = trim((string)($config['pipeOutputChannels'] ?? ''));
-	if ($rawChannels !== '') {
-		$command[] = '--pipe-output-channels';
-		$command[] = $rawChannels;
-	}
-
-	$rawRate = trim((string)($config['pipeOutputRate'] ?? ''));
-	if ($rawRate !== '') {
-		$command[] = '--pipe-output-rate';
-		$command[] = $rawRate;
-	}
-
-	if (parse_boolean_flag($config['pipeOutputUnsigned'] ?? 0, false)) {
-		$command[] = '--pipe-output-unsigned';
-	}
-
-	if (parse_boolean_flag($config['pipeOutputBigEndian'] ?? 0, false)) {
-		$command[] = '--pipe-output-endian';
-		$command[] = 'big';
-	}
-
-	$padEnabled = parse_boolean_flag($config['pipeOutputPad'] ?? 0, false);
-	if ($padEnabled) {
-		$command[] = '--pipe-output-pad';
-		$padDelay = trim((string)($config['pipeOutputPadDelay'] ?? ''));
-		if ($padDelay !== '') {
-			$command[] = '--pipe-output-pad-delay';
-			$command[] = $padDelay;
-		}
 	}
 }
 
@@ -5786,7 +5887,7 @@ if ($action !== '') {
 	}
 
 	if ($action === 'templates_get') {
-		$templates = load_templates($TEMPLATES_FILE, $UI_SETTINGS_FILE);
+		$templates = load_templates($TEMPLATES_DIR, $UI_SETTINGS_FILE, $TEMPLATES_FILE);
 		send_json(array('ok' => true, 'templates' => (object)$templates));
 	}
 
@@ -5798,11 +5899,34 @@ if ($action !== '') {
 
 		$rawTemplates = isset($payload['templates']) && is_array($payload['templates']) ? $payload['templates'] : array();
 		$templates = normalize_templates($rawTemplates);
-		if (!save_templates($TEMPLATES_FILE, $templates)) {
+		// Merge semantics: write/update each provided template without removing
+		// any others that exist on disk. This prevents one client from clobbering
+		// another client's templates when both POST a stale snapshot.
+		if (!save_templates($TEMPLATES_DIR, $templates)) {
 			send_json(array('ok' => false, 'error' => 'Failed to save templates.'), 500);
 		}
 
-		send_json(array('ok' => true, 'templates' => (object)$templates));
+		$allTemplates = read_templates_from_dir($TEMPLATES_DIR);
+		send_json(array('ok' => true, 'templates' => (object)$allTemplates));
+	}
+
+	if ($action === 'template_delete') {
+		$payload = $_POST;
+		if (is_array($jsonPayload) && count($jsonPayload) > 0) {
+			$payload = array_merge($payload, $jsonPayload);
+		}
+
+		$name = isset($payload['name']) ? trim((string)$payload['name']) : '';
+		if ($name === '') {
+			send_json(array('ok' => false, 'error' => 'Template name is required.'), 400);
+		}
+
+		if (!delete_template_from_dir($TEMPLATES_DIR, $name)) {
+			send_json(array('ok' => false, 'error' => 'Failed to delete template.'), 500);
+		}
+
+		$allTemplates = read_templates_from_dir($TEMPLATES_DIR);
+		send_json(array('ok' => true, 'templates' => (object)$allTemplates));
 	}
 
 	if ($action === 'settings_get') {
@@ -10818,6 +10942,12 @@ function deleteTemplateByName(templateName)
 	}
 
 	return saveTemplates().then(function () {
+		return postUserAction('template_delete', { name: name });
+	}).then(function (result) {
+		if (result && result.templates && typeof result.templates === 'object' && !Array.isArray(result.templates)) {
+			settingsTemplates = result.templates;
+		}
+		lastSavedTemplatesFingerprint = computeTemplatesFingerprint(collectTemplatesPayload());
 		refreshGlobalTemplateSelector();
 		renderDeviceList();
 
