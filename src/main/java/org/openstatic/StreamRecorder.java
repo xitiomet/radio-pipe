@@ -853,7 +853,7 @@ public class StreamRecorder {
         long statusCtcssGateSinceNanos = statusClockNanos;
         boolean statusRmsGateOpen = true;  // will be updated on first frame
         long statusRmsGateSinceNanos = statusClockNanos;
-        double statusRmsDb = 0.0;  // current RMS level in dB
+        double statusRmsDb = -100.0;  // current RMS level in dB
         double statusOutputDb = -100.0; // RMS level after all gates
         boolean statusGateOpen = false;
         String statusGateReason = "silence";
@@ -1095,7 +1095,7 @@ public class StreamRecorder {
                         }
                     }
                     statusOutputDb = -100.0;
-                    statusRmsDb = 0.0;
+                    statusRmsDb = -100.0;
                     statusRmsGateOpen = false;
                     statusRmsGateSinceNanos = System.nanoTime();
                     statusGateOpen = false;
