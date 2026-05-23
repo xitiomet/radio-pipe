@@ -124,10 +124,21 @@
     </profile>
     <profile>
       <id>windows-native</id>
+      <!--
+        Auto-activate on Windows hosts so `mvn package` produces the native
+        exe, .res-linked icon/version info, and the NSIS installer without
+        requiring `-Pwindows-native` on the command line.  Can still be
+        disabled with `-P!windows-native` if needed.
+      -->
+      <activation>
+        <os>
+          <family>windows</family>
+        </os>
+      </activation>
       <properties>
         <skipNative>false</skipNative>
         <skipDeb>true</skipDeb>
-        <imageName>${project.artifactId}-${project.version}-native</imageName>
+        <imageName>${project.artifactId}</imageName>
         <windowsResFile>${project.basedir}/src/win/radio-pipe.res</windowsResFile>
       </properties>
       <build>
@@ -150,11 +161,15 @@
                 </goals>
                 <configuration>
                   <executable>rc.exe</executable>
+                  <!-- Run rc.exe from src/win/ so the relative icon path
+                       (..\main\resources\icon.ico) inside radio-pipe.rc
+                       resolves correctly. -->
+                  <workingDirectory>${project.basedir}/src/win</workingDirectory>
                   <arguments>
                     <argument>/nologo</argument>
                     <argument>/fo</argument>
                     <argument>${windowsResFile}</argument>
-                    <argument>${project.basedir}/src/win/radio-pipe.rc</argument>
+                    <argument>radio-pipe.rc</argument>
                   </arguments>
                 </configuration>
               </execution>
@@ -186,6 +201,35 @@
                 -R:MaxHeapSize=2048M
               </buildArgs>
             </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.digitalmediaserver</groupId>
+            <artifactId>nsis-maven-plugin</artifactId>
+            <version>1.0.2</version>
+            <configuration>
+              <makensisExecutable>C:\Program Files (x86)\NSIS\makensis.exe</makensisExecutable>
+              <compression>lzma</compression>
+              <compressionIsFinal>true</compressionIsFinal>
+              <compressionDictSize>64</compressionDictSize>
+              <defines>
+                <PROJECT_NAME_SHORT>radio-pipe</PROJECT_NAME_SHORT>
+                <PROJECT_NAME_CAMEL>${project.name.camel}</PROJECT_NAME_CAMEL>
+              </defines>
+            </configuration>
+            <executions>
+              <execution>
+                <id>build-windows-installer</id>
+                <phase>package</phase>
+                <configuration>
+                  <scriptFile>${basedir}/src/nsis/radio-pipe.nsi</scriptFile>
+                  <outputFile>radio-pipe-setup.exe</outputFile>
+                </configuration>
+                <goals>
+                  <goal>generate-headerfile</goal>
+                  <goal>make</goal>
+                </goals>
+              </execution>
+            </executions>
           </plugin>
         </plugins>
       </build>
