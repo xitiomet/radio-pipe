@@ -176,6 +176,93 @@
         <skipNative>false</skipNative>
         <skipDeb>true</skipDeb>
         <imageName>${project.artifactId}-${project.version}-native</imageName>
+        <windowsResFile>${project.basedir}/src/win/radio-pipe.res</windowsResFile>
+      </properties>
+      <build>
+        <plugins>
+          <!--
+            Compile src/win/radio-pipe.rc into radio-pipe.res using the
+            Windows Resource Compiler (rc.exe).  Run this build from a
+            "Developer Command Prompt for VS" so rc.exe is on PATH.
+          -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <version>3.1.0</version>
+            <executions>
+              <execution>
+                <id>compile-windows-resource</id>
+                <phase>generate-resources</phase>
+                <goals>
+                  <goal>exec</goal>
+                </goals>
+                <configuration>
+                  <executable>rc.exe</executable>
+                  <arguments>
+                    <argument>/nologo</argument>
+                    <argument>/fo</argument>
+                    <argument>${windowsResFile}</argument>
+                    <argument>${project.basedir}/src/win/radio-pipe.rc</argument>
+                  </arguments>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <!--
+            Override the native-image-maven-plugin configuration so the
+            compiled .res file is linked into the produced executable,
+            giving it an icon and version metadata on Windows.
+          -->
+          <plugin>
+            <groupId>org.graalvm.nativeimage</groupId>
+            <artifactId>native-image-maven-plugin</artifactId>
+            <configuration>
+              <skip>${skipNative}</skip>
+              <imageName>${imageName}</imageName>
+              <mainClass>${mainClass}</mainClass>
+              <buildArgs>
+                --no-server
+                --no-fallback
+                --enable-https
+                --enable-http
+                -H:+UseServiceLoaderFeature
+                --allow-incomplete-classpath
+                --report-unsupported-elements-at-runtime
+                -H:+ReportExceptionStackTraces
+                -H:+AllowDeprecatedBuilderClassesOnImageClasspath
+                -H:NativeLinkerOption=${windowsResFile}
+                -R:MaxHeapSize=2048M
+              </buildArgs>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <!--
+      The Debian package (jdeb) only makes sense on Linux build hosts.
+      Auto-activate skipDeb=true on every non-Linux family so Windows and
+      macOS builds skip the .deb step entirely.
+    -->
+    <profile>
+      <id>skip-deb-on-windows</id>
+      <activation>
+        <os>
+          <family>windows</family>
+        </os>
+      </activation>
+      <properties>
+        <skipDeb>true</skipDeb>
+      </properties>
+    </profile>
+    <profile>
+      <id>skip-deb-on-mac</id>
+      <activation>
+        <os>
+          <family>mac</family>
+        </os>
+      </activation>
+      <properties>
+        <skipDeb>true</skipDeb>
       </properties>
     </profile>
   </profiles>

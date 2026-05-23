@@ -148,15 +148,15 @@ public class RadioPipeMain
             .desc("Optional CTCSS tone gate in Hz (example: 100.0); clips only while matching tone is present").build());
         options.addOption(Option.builder().longOpt("gate-hold").hasArg().argName("SECONDS")
             .desc("Hold DCS/CTCSS gates open for this many seconds after detection drops (default 0)").build());
-        options.addOption(Option.builder().longOpt("gain").hasArg().argName("DB")
+        options.addOption(Option.builder("g").longOpt("gain").hasArg().argName("DB")
             .desc("Apply fixed post-gate gain in dB before recording/stdout (range -60 to +60, default 0)").build());
-        options.addOption(Option.builder().longOpt("voice-filter")
+        options.addOption(Option.builder("v").longOpt("voice-filter")
             .desc("Apply post-gate voice band-pass filtering (300-3400 Hz) before gain/output").build());
         options.addOption(Option.builder().longOpt("deemphasis").hasArg().optionalArg(true).argName("TAU")
             .desc("Apply FM de-emphasis filter (default 75 µs for Americas; use 50 for Europe/Asia)").build());
-        options.addOption(Option.builder().longOpt("auto-gain")
+        options.addOption(Option.builder("a").longOpt("auto-gain")
             .desc("Enable automatic post-gate gain boost toward a target level").build());
-        options.addOption(Option.builder().longOpt("api-websocket").hasArg().argName("HOST:PORT")
+        options.addOption(Option.builder("w").longOpt("api-websocket").hasArg().argName("HOST:PORT")
             .desc("Enable websocket API server at host:port (example: 0.0.0.0:9000)").build());
 
         try {

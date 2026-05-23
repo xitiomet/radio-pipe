@@ -1,7 +1,7 @@
 [Desktop Entry]
 Version=1.0
 Name=RadioPipe
-Comment=A Fun Program
+Comment=A Radio Audio filtering tool
 Exec=/usr/bin/radio-pipe
 Icon=/usr/share/icons/radio-pipe/icon-64.png
 Terminal=true
