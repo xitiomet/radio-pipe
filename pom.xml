@@ -123,54 +123,6 @@
       </properties>
     </profile>
     <profile>
-      <id>windows-exe</id>
-      <build>
-        <plugins>
-          <plugin>
-            <groupId>com.akathist.maven.plugins.launch4j</groupId>
-            <artifactId>launch4j-maven-plugin</artifactId>
-            <version>2.5.0</version>
-            <executions>
-              <execution>
-                <id>build-windows-exe</id>
-                <phase>package</phase>
-                <goals>
-                  <goal>launch4j</goal>
-                </goals>
-                <configuration>
-                  <skip>${skipLaunch4j}</skip>
-                  <headerType>console</headerType>
-                  <jar>${project.build.directory}/${project.build.finalName}.jar</jar>
-                  <outfile>${project.build.directory}/${windowsExeName}</outfile>
-                  <icon>${windowsExeIcon}</icon>
-                  <errTitle>${project.name}</errTitle>
-                  <classPath>
-                    <mainClass>${mainClass}</mainClass>
-                  </classPath>
-                  <versionInfo>
-                    <fileVersion>${windowsFileVersion}</fileVersion>
-                    <txtFileVersion>${windowsVersionText}</txtFileVersion>
-                    <productVersion>${windowsProductVersion}</productVersion>
-                    <txtProductVersion>${windowsVersionText}</txtProductVersion>
-                    <fileDescription>${windowsFileDescription}</fileDescription>
-                    <copyright>${windowsCompanyName}</copyright>
-                    <productName>${project.name}</productName>
-                    <companyName>${windowsCompanyName}</companyName>
-                    <internalName>${project.artifactId}</internalName>
-                    <originalFilename>${windowsExeName}</originalFilename>
-                  </versionInfo>
-                  <jre>
-                    <path>jre</path>
-                    <minVersion>${maven.compiler.target}</minVersion>
-                  </jre>
-                </configuration>
-              </execution>
-            </executions>
-          </plugin>
-        </plugins>
-      </build>
-    </profile>
-    <profile>
       <id>windows-native</id>
       <properties>
         <skipNative>false</skipNative>
