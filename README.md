@@ -1,10 +1,10 @@
 ## RadioPipe
 
-RadioPipe is a lightweight command-line recorder for Ham, CB, and GMRS radio streams delivered over Shoutcast or Icecast. It monitors incoming audio and only records when signal is present using root-mean-square (RMS) activation, DCS activation, or CTCSS. This allows you to capture actual transmissions instead of long stretches of silence or noise. It can also read audio from stdin, making it easy to pipe in soundcard input, a DigiRig feed, or any other audio source.
+RadioPipe is a lightweight command-line recorder and signal cleanup tool for Ham, CB, and GMRS radio. It monitors incoming audio and only records when signal is present using root-mean-square (RMS) activation, DCS activation, or CTCSS. This allows you to capture actual transmissions instead of long stretches of silence or noise. It can also read audio from stdin, making it easy to pipe in soundcard input, a DigiRig feed, or any other audio source. There is also a feature for pulling audio directly from your local repeaters internet based MP3 stream.
 
-Built for unattended logging, RadioPipe stores WAV clips in date-based folders and names each file with the stream title and timestamp for quick browsing. You can run multiple instances to the same output directory without conflicts as long as each stream name is unique. A few people have asked me why not just use SoX? Simple Answer? SoX isn't radio aware, radio-pipes features are built around audio coming from radio transmissions.
+Built for unattended logging, RadioPipe stores WAV clips in date-based folders and names each file with the stream title and timestamp for quick browsing. You can run multiple instances to the same output directory without conflicts as long as each stream name is unique. A few people have asked me why not just use SoX? Simple Answer? SoX isn't radio aware, radio-pipes features are built around audio coming from radio transmissions. This includes squelch tone decoding, de-emphasis filters, voice bandpass, and more.
 
-Even though this project is coded in Java, the JVM is not a requirement! Its compiled using GraalVM's native-image and i have provided binaries for windows, linux, and arm64 based devices like the raspberry pi. However this comes with a small price, --input-devs and --output-devs will not work on linux. This is due to an incompatibility with the native libaries. However you can get around this easily by using the JVM version, or using --pipe-input / --pipe-output with arecord or aplay. 
+For those concerned that this project is coded in Java, the application does not require a java environment! radio-pipe is compiled using GraalVM's native-image, and i have provided binaries for windows, linux, and arm64 based devices like the raspberry pi. However this comes with a small price, --input-devs and --output-devs will not work on linux. This is due to an incompatibility with the native libaries. However you can get around this easily by using the JVM version, or using --pipe-input / --pipe-output with arecord or aplay. Or just plain --stdin
 
 ## Feature Overview
 
@@ -14,7 +14,7 @@ Even though this project is coded in Java, the JVM is not a requirement! Its com
 * Can emit gated audio to stdout as WAV clips or raw PCM (`--stdout` / `--stdout-raw`)
 * Can play gated audio directly to a selected hardware output device (`--output-dev`, `--output-devs`)
 * Can launch one or more pipe commands and stream output audio to each command stdin (`--pipe-output` / `--pipe-output-raw`)
-* Can publish real-time recorder events over WebSocket (`--api-websocket host:port`)
+* Can publish real-time recorder events over simple JSON WebSocket (`--api-websocket host:port`) allowing you to trigger other applications or detect unknown DCS/CTCSS tones.
 * Writes date-organized clips with stream metadata and timestamped filenames
 * Supports post-write automation hooks (`--on-write`) for conversion/upload workflows
 * Includes PHP tools for browsing recordings and managing RTL-SDR pipelines
