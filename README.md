@@ -1,8 +1,8 @@
 ## RadioPipe
 
-RadioPipe is a lightweight command-line recorder for Ham, CB, and GMRS radio streams delivered over Shoutcast or Icecast. It monitors incoming audio and only records when signal is present using root-mean-square (RMS) activation, so you capture actual transmissions instead of long stretches of silence. It can also read audio from stdin, making it easy to pipe in soundcard input, a DigiRig feed, or any other audio source.
+RadioPipe is a lightweight command-line recorder for Ham, CB, and GMRS radio streams delivered over Shoutcast or Icecast. It monitors incoming audio and only records when signal is present using root-mean-square (RMS) activation, DCS activation, or CTCSS. This allows you to capture actual transmissions instead of long stretches of silence or noise. It can also read audio from stdin, making it easy to pipe in soundcard input, a DigiRig feed, or any other audio source.
 
-Built for unattended logging, RadioPipe stores WAV clips in date-based folders and names each file with the stream title and timestamp for quick browsing. You can run multiple instances to the same output directory without conflicts as long as each stream name is unique.
+Built for unattended logging, RadioPipe stores WAV clips in date-based folders and names each file with the stream title and timestamp for quick browsing. You can run multiple instances to the same output directory without conflicts as long as each stream name is unique. A few people have asked me why not just use SoX? Simple Answer? SoX isn't radio aware, radio-pipes features are built around audio coming from radio transmissions.
 
 Even though this project is coded in Java, the JVM is not a requirement! Its compiled using GraalVM's native-image and i have provided binaries for windows, linux, and arm64 based devices like the raspberry pi. However this comes with a small price, --input-devs and --output-devs will not work on linux. This is due to an incompatibility with the native libaries. However you can get around this easily by using the JVM version, or using --pipe-input / --pipe-output with arecord or aplay. 
 
